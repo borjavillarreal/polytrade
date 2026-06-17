@@ -6,11 +6,19 @@ name: polytrade-cycle
 #   * publishes the dashboard to GitHub Pages (a web link you can open anywhere)
 #   * opens a GitHub issue that @mentions you (-> email) when the model flags a
 #     NEW high-edge market or a market resolves.
+#
+# Manual "Run workflow" has a "test_alert" checkbox: tick it to send a one-time
+# test alert email (it skips the real, paid cycle).
 
 on:
   schedule:
     - cron: "0 */6 * * *"      # every 6 hours (UTC). Widen this to spend less.
-  workflow_dispatch: {}          # adds a manual "Run workflow" button
+  workflow_dispatch:
+    inputs:
+      test_alert:
+        description: "Send a one-time TEST alert email (skips the real cycle)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write                # commit updated DB + dashboard back to the repo
@@ -31,17 +39,21 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
+        if: ${{ github.event.inputs.test_alert != 'true' }}
         run: pip install -r requirements.txt
 
       - name: Run one cycle
+        if: ${{ github.event.inputs.test_alert != 'true' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python run_cycle.py
 
       - name: Publish dashboard as the Pages homepage
+        if: ${{ github.event.inputs.test_alert != 'true' }}
         run: cp dashboard.html index.html
 
       - name: Commit updated predictions + dashboard
+        if: ${{ github.event.inputs.test_alert != 'true' }}
         run: |
           git config user.name "polytrade-bot"
           git config user.email "actions@users.noreply.github.com"
@@ -53,22 +65,27 @@ jobs:
             git push
           fi
 
-      - name: Email an alert if the model found a new high-edge market
+      - name: Seed a TEST alert (manual test button only)
+        if: ${{ github.event.inputs.test_alert == 'true' }}
+        run: |
+          printf -- '- TEST ALERT: email alerts are working. This is not a real market.\n' > alerts.txt
+
+      - name: Email an alert if there is one
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ -s alerts.txt ]; then
             {
-              echo "@${{ github.repository_owner }} — the model flagged new high-edge market(s) this cycle:"
+              echo "@${{ github.repository_owner }} — Polytrade flagged something this cycle:"
               echo
               cat alerts.txt
               echo
               echo "Dashboard: https://${{ github.repository_owner }}.github.io/polytrade/"
             } > issue_body.txt
             gh issue create --repo "${{ github.repository }}" \
-              --title "Polytrade alert: new high-edge market(s)" \
+              --title "Polytrade alert" \
               --body-file issue_body.txt
           else
-            echo "No new high-edge markets this cycle — no email."
+            echo "Nothing to alert on this cycle — no email."
           fi
