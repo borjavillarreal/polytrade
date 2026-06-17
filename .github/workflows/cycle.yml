@@ -1,8 +1,11 @@
 name: polytrade-cycle
 
 # Runs one full paper-mode cycle (fetch -> analyze -> score -> dashboard) in the
-# cloud, on a schedule, so it works even when your computer is off.
-# NO real trades. The Anthropic key comes from the encrypted repo secret.
+# cloud, on a schedule, so it works even when your computer is off. NO real trades.
+# The Anthropic key comes from the encrypted repo secret. This workflow also:
+#   * publishes the dashboard to GitHub Pages (a web link you can open anywhere)
+#   * opens a GitHub issue that @mentions you (-> email) when the model flags a
+#     NEW high-edge market or a market resolves.
 
 on:
   schedule:
@@ -10,10 +13,11 @@ on:
   workflow_dispatch: {}          # adds a manual "Run workflow" button
 
 permissions:
-  contents: write                # lets the run commit the updated DB + dashboard
+  contents: write                # commit updated DB + dashboard back to the repo
+  issues: write                  # open an alert issue (which emails you)
 
 concurrency:
-  group: polytrade-cycle         # never run two cycles at once
+  group: polytrade-cycle
   cancel-in-progress: false
 
 jobs:
@@ -34,14 +38,37 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python run_cycle.py
 
+      - name: Publish dashboard as the Pages homepage
+        run: cp dashboard.html index.html
+
       - name: Commit updated predictions + dashboard
         run: |
           git config user.name "polytrade-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add -f polytrade.db dashboard.html
+          git add -f polytrade.db dashboard.html index.html
           if git diff --cached --quiet; then
             echo "No changes this cycle."
           else
             git commit -m "cycle $(date -u +%Y-%m-%dT%H:%MZ)"
             git push
+          fi
+
+      - name: Email an alert if the model found a new high-edge market
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -s alerts.txt ]; then
+            {
+              echo "@${{ github.repository_owner }} — the model flagged new high-edge market(s) this cycle:"
+              echo
+              cat alerts.txt
+              echo
+              echo "Dashboard: https://${{ github.repository_owner }}.github.io/polytrade/"
+            } > issue_body.txt
+            gh issue create --repo "${{ github.repository }}" \
+              --title "Polytrade alert: new high-edge market(s)" \
+              --body-file issue_body.txt
+          else
+            echo "No new high-edge markets this cycle — no email."
           fi

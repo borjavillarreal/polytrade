@@ -11,6 +11,7 @@ NO real trades, NO wallet, NO private keys. This is the engine that
 run_forever.py calls on a schedule.
 """
 
+import os
 import subprocess
 from datetime import datetime, timezone
 
@@ -100,6 +101,26 @@ def main() -> None:
             f"Polytrade: {len(newly_resolved)} market(s) resolved",
             "Run the dashboard to see how the model scored.",
         )
+
+    # Write this cycle's NEW alerts to a file. The cloud workflow turns a non-empty
+    # alerts.txt into a GitHub issue that emails you. Cleared when nothing is new,
+    # so you never get re-emailed about markets you've already been told about.
+    alert_lines = []
+    for r in sorted(new_big, key=lambda x: abs(x["edge"]), reverse=True):
+        alert_lines.append(
+            f"- {r['question']}\n    model {r['model_prob']:.2f} vs market "
+            f"{r['market_prob']:.2f}  (edge {r['edge']:+.2f})"
+        )
+    if newly_resolved:
+        alert_lines.append(
+            f"- {len(newly_resolved)} market(s) just resolved — see the dashboard "
+            "for how the model scored vs. the market."
+        )
+    if alert_lines:
+        with open("alerts.txt", "w") as fh:
+            fh.write("\n".join(alert_lines) + "\n")
+    elif os.path.exists("alerts.txt"):
+        os.remove("alerts.txt")
 
     print("-" * 64)
     print(f"cycle done in {(datetime.now(timezone.utc) - started).total_seconds():.0f}s  |  "
