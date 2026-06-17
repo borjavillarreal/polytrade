@@ -40,33 +40,46 @@ except ImportError:
 
 
 SYSTEM_PROMPT = (
-    "You are a calibrated probability forecaster. Given a prediction-market "
-    "question and current date, estimate the true probability of Yes. Output "
-    "strict JSON: {probability: float, confidence: low|med|high, reasoning: "
-    "string}."
+    "You are a calibrated probability forecaster for prediction markets. You are "
+    "given a market's question, its RESOLUTION RULES, and the current date. "
+    "Estimate the true probability that the market resolves YES, strictly per its "
+    "rules. The rules are decisive and often contain conditions the title omits: "
+    "deadlines, precise definitions of what counts, and fallback outcomes (a market "
+    "may resolve 50-50 / void if neither side occurs by a deadline). Your "
+    "probability MUST reflect every such condition; when a 50-50 fallback is "
+    "likely, the true probability of YES is pulled toward 0.5 even if the headline "
+    "event itself is unlikely. Output strict JSON: {probability: float, confidence: "
+    "low|med|high, reasoning: string}."
 )
 
 
 def build_user_prompt(row) -> str:
     """row is a markets-table sqlite3.Row."""
+    rules = (row["description"] or "").strip()[:3500]
+    rules_block = rules if rules else "(No additional rules text was provided.)"
     return (
         f"FETCH TIMESTAMP (treat this as 'now'): {row['fetch_timestamp']}\n"
         f"MARKET QUESTION: {row['question']}\n"
         f"'Yes' here means the outcome resolves to: {row['target_outcome']}\n"
         f"Scheduled resolution date: {row['resolution_date']}\n\n"
-        "Estimate the true probability that this resolves to 'Yes' "
-        f"({row['target_outcome']}).\n\n"
+        "RESOLUTION RULES — these govern the outcome; read them carefully:\n"
+        f'"""\n{rules_block}\n"""\n\n'
+        "Estimate the true probability that this market resolves 'Yes' STRICTLY "
+        "per the rules above.\n\n"
         "CONSTRAINTS:\n"
-        "- Reason ONLY from information that would be available as of the FETCH "
-        "TIMESTAMP above. Do not use knowledge of events after that moment.\n"
+        "- Resolve to the RULES, not the headline. If the rules specify a 50-50 / "
+        "void / tie fallback when neither side happens by a deadline, weight it "
+        "explicitly: your P(Yes) is pulled toward 0.5 to the extent that fallback "
+        "is likely. Honor exact definitions of what counts and every deadline.\n"
+        "- Reason ONLY from information available as of the FETCH TIMESTAMP above. "
+        "Do not use knowledge of events after that moment.\n"
         "- If a search result appears to state or strongly imply the FINAL "
-        "resolution of this exact market (e.g. a post-event recap, a result "
-        "already called), IGNORE it and note that you did so. We are measuring "
-        "foresight, not hindsight.\n"
+        "resolution of this exact market, IGNORE it and note that you did so. We "
+        "measure foresight, not hindsight.\n"
         "- Do NOT anchor to the current market price; form an independent estimate.\n\n"
         "Respond with ONLY the strict JSON object: "
         '{"probability": <float 0..1>, "confidence": "low|med|high", '
-        '"reasoning": "<concise rationale, note any ignored leakage>"}'
+        '"reasoning": "<concise rationale; note how the rules/fallback affected it>"}'
     )
 
 

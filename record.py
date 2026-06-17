@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS markets (
     market_id        TEXT PRIMARY KEY,
     condition_id     TEXT,
     question         TEXT NOT NULL,
+    description      TEXT,               -- full resolution rules (decisive for forecasting)
     target_outcome   TEXT NOT NULL,      -- the outcome whose probability we measure
     yes_price        REAL NOT NULL,      -- market-implied P(target_outcome) at fetch
     volume           REAL,
@@ -110,6 +111,10 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> None:
     conn = conn or connect()
     try:
         conn.executescript(_SCHEMA)
+        # lightweight migration: add columns introduced after a DB was first created
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(markets)").fetchall()}
+        if "description" not in cols:
+            conn.execute("ALTER TABLE markets ADD COLUMN description TEXT")
         conn.commit()
     finally:
         if own:
@@ -124,13 +129,14 @@ def upsert_market(conn: sqlite3.Connection, m: dict, fetch_timestamp: str) -> No
     the frozen decision price lives in predictions, so refreshing here is safe."""
     conn.execute(
         """
-        INSERT INTO markets (market_id, condition_id, question, target_outcome,
-                             yes_price, volume, liquidity, yes_token_id,
-                             resolution_date, fetch_timestamp)
-        VALUES (:market_id, :condition_id, :question, :target_outcome,
-                :yes_price, :volume, :liquidity, :yes_token_id,
-                :resolution_date, :fetch_timestamp)
+        INSERT INTO markets (market_id, condition_id, question, description,
+                             target_outcome, yes_price, volume, liquidity,
+                             yes_token_id, resolution_date, fetch_timestamp)
+        VALUES (:market_id, :condition_id, :question, :description,
+                :target_outcome, :yes_price, :volume, :liquidity,
+                :yes_token_id, :resolution_date, :fetch_timestamp)
         ON CONFLICT(market_id) DO UPDATE SET
+            description=excluded.description,
             yes_price=excluded.yes_price,
             volume=excluded.volume,
             liquidity=excluded.liquidity,
@@ -141,6 +147,7 @@ def upsert_market(conn: sqlite3.Connection, m: dict, fetch_timestamp: str) -> No
             "market_id": m["market_id"],
             "condition_id": m.get("condition_id"),
             "question": m["question"],
+            "description": m.get("description", ""),
             "target_outcome": m["target_outcome"],
             "yes_price": m["target_prob"],
             "volume": m.get("volume"),

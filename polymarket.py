@@ -98,6 +98,7 @@ def normalize_market(m: dict) -> Optional[dict]:
         "market_id": str(m.get("id")),
         "condition_id": m.get("conditionId"),
         "question": m.get("question", "").strip(),
+        "description": (m.get("description") or "").strip(),  # full resolution rules
         "target_outcome": target_outcome,
         "outcomes": outcomes,
         "target_prob": target_prob,

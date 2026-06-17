@@ -58,7 +58,7 @@ GAMMA_MAX_PAGES = 40
 # Analysis run limits (analyze.py)
 # --------------------------------------------------------------------------
 # Max markets to analyze in a single analyze.py run (cost guardrail).
-MAX_ANALYZE_PER_RUN = 25
+MAX_ANALYZE_PER_RUN = 50
 
 # Seconds to sleep between Anthropic calls (simple client-side rate limiting).
 ANALYZE_RATE_LIMIT_SECONDS = 2.0
