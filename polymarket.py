@@ -157,6 +157,27 @@ def get_clob_price(token_id: str, side: str = "BUY") -> Optional[float]:
     return None
 
 
+def price_and_status(market_id: str) -> Optional[dict]:
+    """Single-call snapshot used by the paper trader to mark/settle a position.
+
+    Returns {"yes_price": float, "closed": bool, "outcome": float|None}.
+    While open, yes_price is the current market price and outcome is None. Once
+    closed, outcomePrices[0] is the resolved value (0/0.5/1), so it is both the
+    final price and the outcome. Returns None on fetch failure.
+    """
+    raw = get_market(market_id)
+    if not raw:
+        return None
+    prices = _parse_json_array(raw.get("outcomePrices"))
+    if len(prices) < 1:
+        return None
+    yes = _to_float(prices[0], default=-1.0)
+    if not (0.0 <= yes <= 1.0):
+        return None
+    closed = bool(raw.get("closed"))
+    return {"yes_price": yes, "closed": closed, "outcome": (yes if closed else None)}
+
+
 def resolution_for(market_id: str) -> Optional[float]:
     """Return the resolved probability of the FIRST outcome, or None if unresolved.
 

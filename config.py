@@ -80,6 +80,39 @@ BET_SIZE_USD = 100.0
 CALIBRATION_BUCKETS = 10
 
 # --------------------------------------------------------------------------
+# Paper-trading simulator (paper_trading.py) — FICTIONAL money only.
+# Simulates a portfolio: opens positions on the model's edge, takes profit,
+# cuts losses, and settles at resolution. No wallet, no real funds, no orders.
+# --------------------------------------------------------------------------
+PAPER_TRADING_ENABLED = True
+STARTING_CAPITAL = 1000.0          # fictional starting bankroll (USD)
+
+# Entry: open a position when the LIVE edge (model_prob - current price) exceeds
+# this. Direction is LONG (buy "Yes") if the model thinks Yes is underpriced,
+# SHORT (buy "No") if overpriced.
+TRADE_ENTRY_EDGE = 0.10
+# Risk sizing: stake this fraction of current total equity per new position...
+POSITION_SIZE_FRACTION = 0.10
+# ...capped at this many dollars, and never more than available cash.
+MAX_POSITION_USD = 150.0
+# Skip a side priced outside this band (avoid illiquid longshots / no-upside).
+MIN_ENTRY_PRICE = 0.05
+MAX_ENTRY_PRICE = 0.95
+# At most this many open positions at once (diversification + cash control).
+MAX_OPEN_POSITIONS = 12
+
+# Exits (whichever triggers first):
+TAKE_PROFIT_PCT = 0.40             # close when a position is up >= 40%
+STOP_LOSS_PCT = 0.25               # close when a position is down >= 25%
+# Also take profit when price reaches the model's fair value (edge captured).
+EXIT_ON_EDGE_CLOSED = True
+
+# Approximate round-trip friction (spread + slippage + fees) as a fraction of
+# each trade's notional, charged on entry and on market exits. Keeps the sim
+# from being unrealistically optimistic. Settlement at resolution is free.
+TRADE_FEE_PCT = 0.01
+
+# --------------------------------------------------------------------------
 # 24/7 automation (run_cycle.py / run_forever.py) — paper mode, NO real trades
 # --------------------------------------------------------------------------
 # Hours between automated cycles in run_forever.py.

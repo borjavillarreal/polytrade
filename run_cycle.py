@@ -20,6 +20,7 @@ import record
 import fetch_markets
 import analyze
 import score
+import paper_trading
 import dashboard
 
 
@@ -71,6 +72,20 @@ def main() -> None:
         except Exception as exc:          # never let one step kill the whole cycle
             print(f"  [{name}] failed: {exc}")
 
+    # paper-trading simulation (fictional money — no real trades)
+    trade_summary = None
+    try:
+        pt_conn = record.connect()
+        record.init_db(pt_conn)
+        trade_summary = paper_trading.run(pt_conn)
+        pt_conn.close()
+        if trade_summary and trade_summary.get("enabled"):
+            print(f"  [paper_trading] equity ${trade_summary['equity']:.2f} "
+                  f"({trade_summary['return_pct']:+.1%})  buys {len(trade_summary['buys'])} "
+                  f"sells {len(trade_summary['sells'])} settles {len(trade_summary['settles'])}")
+    except Exception as exc:
+        print(f"  [paper_trading] failed: {exc}")
+
     try:
         dashboard.generate(open_browser=False)
     except Exception as exc:
@@ -116,6 +131,21 @@ def main() -> None:
             f"- {len(newly_resolved)} market(s) just resolved — see the dashboard "
             "for how the model scored vs. the market."
         )
+    if trade_summary and trade_summary.get("enabled") and (
+            trade_summary["buys"] or trade_summary["sells"] or trade_summary["settles"]):
+        ts = trade_summary
+        alert_lines.append("")
+        alert_lines.append(
+            f"Paper portfolio: ${ts['equity']:.2f} ({ts['return_pct']:+.1%} vs "
+            f"${config.STARTING_CAPITAL:.0f}), cash ${ts['cash']:.2f}, "
+            f"{ts['open']} open position(s)."
+        )
+        for b in ts["buys"]:
+            alert_lines.append(f"  BOUGHT ${b['stake']:.0f} {b['side']} — {b['question'][:58]}")
+        for s in ts["sells"]:
+            alert_lines.append(f"  SOLD ({s['reason']}) {s['pnl']:+.2f} — {s['question'][:58]}")
+        for s in ts["settles"]:
+            alert_lines.append(f"  SETTLED {s['pnl']:+.2f} — {s['question'][:58]}")
     if alert_lines:
         with open("alerts.txt", "w") as fh:
             fh.write("\n".join(alert_lines) + "\n")

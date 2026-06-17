@@ -50,6 +50,52 @@ CREATE TABLE IF NOT EXISTS predictions (
     outcome           REAL,              -- resolved P(target): 0.0 / 0.5 / 1.0, NULL until resolved
     scored_timestamp  TEXT
 );
+
+-- ----- paper-trading simulator (FICTIONAL money) -----
+CREATE TABLE IF NOT EXISTS portfolio (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    starting_cash  REAL NOT NULL,
+    cash           REAL NOT NULL,         -- uninvested fictional cash
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS positions (
+    market_id        TEXT PRIMARY KEY,
+    question         TEXT,
+    side             TEXT,                -- LONG (bought Yes) | SHORT (bought No)
+    shares           REAL,
+    entry_price      REAL,                -- price of the side bought
+    cost_basis       REAL,                -- cash spent on shares (excl. fee)
+    model_prob       REAL,                -- model fair value of Yes (exit target)
+    entry_timestamp  TEXT,
+    last_price       REAL,                -- most recent price of the side (mark)
+    last_value       REAL,                -- most recent mark-to-market value
+    last_marked      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS trades (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp     TEXT NOT NULL,
+    market_id     TEXT,
+    question      TEXT,
+    action        TEXT,                   -- BUY | SELL | SETTLE
+    side          TEXT,                   -- LONG | SHORT
+    shares        REAL,
+    price         REAL,                   -- fill price of the side
+    cash_delta    REAL,                   -- change to cash (negative for BUY)
+    fee           REAL,
+    realized_pnl  REAL,                   -- on SELL/SETTLE (NULL for BUY)
+    reason        TEXT                    -- entry | take_profit | stop_loss |
+                                          --   edge_closed | resolved
+);
+
+CREATE TABLE IF NOT EXISTS equity_curve (
+    timestamp        TEXT PRIMARY KEY,
+    cash             REAL,
+    positions_value  REAL,
+    total_value      REAL
+);
 """
 
 
@@ -190,3 +236,113 @@ def open_prediction_count(conn: sqlite3.Connection) -> int:
 def total_token_cost(conn: sqlite3.Connection) -> float:
     row = conn.execute("SELECT COALESCE(SUM(token_cost_usd), 0) FROM predictions").fetchone()
     return float(row[0])
+
+
+# --------------------------------------------------------------------------
+# paper-trading simulator (FICTIONAL money)
+# --------------------------------------------------------------------------
+def ensure_portfolio(conn: sqlite3.Connection, starting_cash: float, now_iso: str) -> None:
+    exists = conn.execute("SELECT 1 FROM portfolio WHERE id = 1").fetchone()
+    if not exists:
+        conn.execute(
+            "INSERT INTO portfolio (id, starting_cash, cash, created_at, updated_at) "
+            "VALUES (1, ?, ?, ?, ?)",
+            (starting_cash, starting_cash, now_iso, now_iso),
+        )
+
+
+def get_portfolio(conn: sqlite3.Connection):
+    return conn.execute("SELECT * FROM portfolio WHERE id = 1").fetchone()
+
+
+def set_cash(conn: sqlite3.Connection, cash: float, now_iso: str) -> None:
+    conn.execute("UPDATE portfolio SET cash = ?, updated_at = ? WHERE id = 1", (cash, now_iso))
+
+
+def open_positions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM positions ORDER BY entry_timestamp").fetchall()
+
+
+def held_market_ids(conn: sqlite3.Connection) -> set:
+    return {r["market_id"] for r in conn.execute("SELECT market_id FROM positions")}
+
+
+def insert_position(conn: sqlite3.Connection, pos: dict) -> None:
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO positions
+            (market_id, question, side, shares, entry_price, cost_basis,
+             model_prob, entry_timestamp, last_price, last_value, last_marked)
+        VALUES (:market_id, :question, :side, :shares, :entry_price, :cost_basis,
+                :model_prob, :entry_timestamp, :last_price, :last_value, :last_marked)
+        """,
+        pos,
+    )
+
+
+def mark_position(conn: sqlite3.Connection, market_id: str, last_price: float,
+                  last_value: float, marked: str) -> None:
+    conn.execute(
+        "UPDATE positions SET last_price = ?, last_value = ?, last_marked = ? "
+        "WHERE market_id = ?",
+        (last_price, last_value, marked, market_id),
+    )
+
+
+def close_position(conn: sqlite3.Connection, market_id: str) -> None:
+    conn.execute("DELETE FROM positions WHERE market_id = ?", (market_id,))
+
+
+def insert_trade(conn: sqlite3.Connection, trade: dict) -> None:
+    conn.execute(
+        """
+        INSERT INTO trades
+            (timestamp, market_id, question, action, side, shares, price,
+             cash_delta, fee, realized_pnl, reason)
+        VALUES (:timestamp, :market_id, :question, :action, :side, :shares, :price,
+                :cash_delta, :fee, :realized_pnl, :reason)
+        """,
+        trade,
+    )
+
+
+def insert_equity_point(conn: sqlite3.Connection, timestamp: str, cash: float,
+                        positions_value: float, total_value: float) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO equity_curve (timestamp, cash, positions_value, total_value) "
+        "VALUES (?, ?, ?, ?)",
+        (timestamp, cash, positions_value, total_value),
+    )
+
+
+def get_trades(conn: sqlite3.Connection, limit: int = 0) -> list[sqlite3.Row]:
+    q = "SELECT * FROM trades ORDER BY id DESC"
+    if limit:
+        q += f" LIMIT {int(limit)}"
+    return conn.execute(q).fetchall()
+
+
+def get_equity_curve(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM equity_curve ORDER BY timestamp").fetchall()
+
+
+def realized_pnl_total(conn: sqlite3.Connection) -> float:
+    row = conn.execute(
+        "SELECT COALESCE(SUM(realized_pnl), 0) FROM trades WHERE realized_pnl IS NOT NULL"
+    ).fetchone()
+    return float(row[0])
+
+
+def candidate_entries(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Open predictions we don't already hold, joined to a current market price."""
+    return conn.execute(
+        """
+        SELECT p.market_id, p.question, p.model_prob, p.target_outcome,
+               m.yes_price AS current_price
+        FROM predictions p
+        JOIN markets m ON m.market_id = p.market_id
+        WHERE p.resolved = 0
+          AND p.market_id NOT IN (SELECT market_id FROM positions)
+          AND p.market_id NOT IN (SELECT DISTINCT market_id FROM trades)
+        """
+    ).fetchall()

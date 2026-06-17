@@ -26,6 +26,134 @@ def _stat_card(label: str, value: str, sub: str = "") -> str:
             f'<div class="value">{html.escape(value)}</div>{sub_html}</div>')
 
 
+def _equity_svg(values: list, starting: float) -> str:
+    """Inline SVG line chart of total portfolio value over time."""
+    if len(values) < 2:
+        return ('<div class="empty">The equity timeline fills in once the simulator '
+                'has run for a few cycles.</div>')
+    W, H = 900, 220
+    pl, pr, pt, pb = 56, 14, 14, 26
+    pw, ph = W - pl - pr, H - pt - pb
+    vmin = min(min(values), starting)
+    vmax = max(max(values), starting)
+    if vmax - vmin < 1e-9:
+        vmin -= 1.0
+        vmax += 1.0
+    span = vmax - vmin
+    n = len(values)
+
+    def fx(i):
+        return pl + pw * (i / (n - 1))
+
+    def fy(v):
+        return pt + ph * (1 - (v - vmin) / span)
+
+    poly = " ".join(f"{fx(i):.1f},{fy(v):.1f}" for i, v in enumerate(values))
+    last = values[-1]
+    color = "#4ade80" if last >= starting else "#f87171"
+    by = fy(starting)
+    return (
+        f'<svg viewBox="0 0 {W} {H}" style="width:100%;height:auto;background:#11161d;'
+        f'border:1px solid #232a34;border-radius:10px">'
+        f'<line x1="{pl}" y1="{by:.1f}" x2="{W - pr}" y2="{by:.1f}" stroke="#3a4452" '
+        f'stroke-dasharray="4 4"/>'
+        f'<text x="{pl - 6}" y="{by + 3:.1f}" fill="#8a94a3" font-size="11" '
+        f'text-anchor="end">${starting:,.0f}</text>'
+        f'<text x="{pl - 6}" y="{pt + 8:.1f}" fill="#8a94a3" font-size="11" '
+        f'text-anchor="end">${vmax:,.0f}</text>'
+        f'<text x="{pl - 6}" y="{pt + ph:.1f}" fill="#8a94a3" font-size="11" '
+        f'text-anchor="end">${vmin:,.0f}</text>'
+        f'<polyline points="{poly}" fill="none" stroke="{color}" stroke-width="2"/>'
+        f'<circle cx="{fx(n - 1):.1f}" cy="{fy(last):.1f}" r="3.5" fill="{color}"/>'
+        f'<text x="{W - pr}" y="{fy(last) - 7:.1f}" fill="{color}" font-size="12" '
+        f'text-anchor="end">${last:,.0f}</text>'
+        f'</svg>'
+    )
+
+
+def _portfolio_section(conn) -> str:
+    pf = record.get_portfolio(conn)
+    if not pf:
+        return ('<h2>Paper portfolio</h2><div class="empty">The $'
+                f'{config.STARTING_CAPITAL:,.0f} paper portfolio starts trading on the '
+                'next cloud cycle.</div>')
+
+    eq = record.get_equity_curve(conn)
+    positions = record.open_positions(conn)
+    trades = record.get_trades(conn, limit=30)
+    realized = record.realized_pnl_total(conn)
+    starting = float(pf["starting_cash"])
+    cash = float(pf["cash"])
+    if eq:
+        total = float(eq[-1]["total_value"])
+    else:
+        total = cash + sum(float(p["last_value"] or 0) for p in positions)
+    ret = (total - starting) / starting if starting else 0.0
+    cls = "good" if total >= starting else "bad"
+
+    cards = [
+        _stat_card("Starting", f"${starting:,.0f}"),
+        (f'<div class="card"><div class="label">Total equity</div>'
+         f'<div class="value {cls}">${total:,.2f}</div>'
+         f'<div class="sub {cls}">{ret:+.1%}</div></div>'),
+        _stat_card("Cash", f"${cash:,.2f}"),
+        _stat_card("Realized P&L", f"${realized:,.2f}"),
+        _stat_card("Open positions", str(len(positions))),
+    ]
+    svg = _equity_svg([float(p["total_value"]) for p in eq], starting)
+
+    if positions:
+        prows = []
+        for p in positions:
+            cb = float(p["cost_basis"] or 0)
+            lv = float(p["last_value"] if p["last_value"] is not None else cb)
+            upct = (lv - cb) / cb if cb else 0.0
+            pcls = "good" if lv >= cb else "bad"
+            prows.append(
+                f'<tr><td class="q">{html.escape((p["question"] or "")[:68])}</td>'
+                f'<td>{html.escape(p["side"] or "")}</td>'
+                f'<td>{float(p["entry_price"] or 0):.2f}</td>'
+                f'<td>{float(p["last_price"] or 0):.2f}</td>'
+                f'<td>${lv:,.0f}</td>'
+                f'<td class="{pcls}">{upct:+.0%}</td></tr>'
+            )
+        pos_block = ('<h3>Open positions</h3><table><thead><tr><th>market</th>'
+                     '<th>side</th><th>entry</th><th>now</th><th>value</th>'
+                     '<th>P&amp;L</th></tr></thead><tbody>'
+                     + "".join(prows) + '</tbody></table>')
+    else:
+        pos_block = '<h3>Open positions</h3><div class="empty">None open right now.</div>'
+
+    if trades:
+        trows = []
+        for t in trades:
+            pnl = t["realized_pnl"]
+            pnl_txt = "" if pnl is None else f"{pnl:+.2f}"
+            pnl_cls = "" if pnl is None else ("good" if pnl >= 0 else "bad")
+            when = (t["timestamp"] or "")[:16].replace("T", " ")
+            trows.append(
+                f'<tr><td>{html.escape(when)}</td>'
+                f'<td>{html.escape(t["action"] or "")}</td>'
+                f'<td>{html.escape(t["side"] or "")}</td>'
+                f'<td class="q">{html.escape((t["question"] or "")[:52])}</td>'
+                f'<td>{float(t["price"] or 0):.2f}</td>'
+                f'<td class="{pnl_cls}">{pnl_txt}</td>'
+                f'<td>{html.escape(t["reason"] or "")}</td></tr>'
+            )
+        ledger_block = ('<h3>Movements <span class="hint">(most recent first)</span></h3>'
+                        '<table><thead><tr><th>when (UTC)</th><th>action</th><th>side</th>'
+                        '<th>market</th><th>price</th><th>P&amp;L</th><th>why</th></tr>'
+                        '</thead><tbody>' + "".join(trows) + '</tbody></table>')
+    else:
+        ledger_block = ('<h3>Movements</h3><div class="empty">No trades yet — the first '
+                        'positions open on the next cloud cycle.</div>')
+
+    return (f'<h2>Paper portfolio <span class="hint">(fictional ${starting:,.0f} — '
+            f'no real money)</span></h2>'
+            f'<div class="cards">{"".join(cards)}</div>'
+            f'<h3>Equity over time</h3>{svg}{pos_block}{ledger_block}')
+
+
 def _build_html(conn) -> str:
     n_markets = conn.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
     preds = record.all_predictions(conn)
@@ -140,6 +268,8 @@ def _build_html(conn) -> str:
             f'<tbody>{"".join(res_rows)}</tbody></table>'
         )
 
+    portfolio_block = _portfolio_section(conn)
+
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <title>Polytrade dashboard</title>
 <style>
@@ -159,6 +289,7 @@ def _build_html(conn) -> str:
   .sub {{ color: #8a94a3; font-size: 12px; }}
   .row2 {{ display: flex; gap: 26px; margin-top: 8px; font-size: 18px; }}
   h2 {{ font-size: 15px; margin: 26px 0 8px; }}
+  h3 {{ font-size: 13px; margin: 18px 0 6px; color: #c7d0db; }}
   .hint {{ color: #8a94a3; font-weight: 400; font-size: 12px; }}
   table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
   th, td {{ text-align: right; padding: 7px 10px; border-bottom: 1px solid #232a34; }}
@@ -175,6 +306,8 @@ def _build_html(conn) -> str:
   <div class="meta">model {html.escape(config.ANTHROPIC_MODEL)} &middot; updated {updated}
     &middot; paper-trading measurement &mdash; no real trades</div>
   <div class="cards">{''.join(cards)}</div>
+  {portfolio_block}
+  <h2>Model vs. market <span class="hint">(the underlying forecasting test)</span></h2>
   {scoreboard}
   {open_block}
   {resolved_block}

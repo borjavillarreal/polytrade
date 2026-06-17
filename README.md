@@ -147,6 +147,32 @@ predictions on a schedule and fires a macOS notification when a new market clear
 It runs while the Terminal stays open and the Mac is awake; for reboot-proof or
 off-machine operation you'd add a `launchd` job or a cloud server (separate step).
 
+### Paper-trading simulator (`paper_trading.py`) — fictional money
+
+A portfolio simulation layered on top of the forecasts. It starts with a
+fictional `STARTING_CAPITAL` (default $1,000) and, every cycle:
+
+1. **Marks** each open position to the current Polymarket price.
+2. **Exits** on take-profit (`TAKE_PROFIT_PCT`), stop-loss (`STOP_LOSS_PCT`),
+   the model's fair value being reached, or resolution (settles to the real
+   outcome).
+3. **Enters** new positions where the model still sees a live edge
+   (`model_prob − current price > TRADE_ENTRY_EDGE`), sized as
+   `POSITION_SIZE_FRACTION` of equity, capped by `MAX_POSITION_USD` and cash.
+4. Records total value to an **equity-curve timeline**.
+
+It buys "Yes" (LONG) when the model thinks Yes is underpriced and "No" (SHORT)
+when overpriced. Every market is traded at most once (no churn). A configurable
+`TRADE_FEE_PCT` approximates spread/slippage so results aren't unrealistically
+rosy. The dashboard shows the equity chart, open positions, and a full movements
+ledger.
+
+**This is a simulation.** Fills happen at the screen price (plus the friction
+estimate); real Polymarket has order-book depth, slippage, and liquidity limits a
+sim can't fully capture. Treat results as directional evidence before any real
+money — which is exactly the point of running it for a while first. **No wallet,
+no funds, no orders. There is still zero real trading anywhere in this project.**
+
 ---
 
 ## Design guarantees
