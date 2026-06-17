@@ -1,0 +1,47 @@
+name: polytrade-cycle
+
+# Runs one full paper-mode cycle (fetch -> analyze -> score -> dashboard) in the
+# cloud, on a schedule, so it works even when your computer is off.
+# NO real trades. The Anthropic key comes from the encrypted repo secret.
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"      # every 6 hours (UTC). Widen this to spend less.
+  workflow_dispatch: {}          # adds a manual "Run workflow" button
+
+permissions:
+  contents: write                # lets the run commit the updated DB + dashboard
+
+concurrency:
+  group: polytrade-cycle         # never run two cycles at once
+  cancel-in-progress: false
+
+jobs:
+  cycle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run one cycle
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python run_cycle.py
+
+      - name: Commit updated predictions + dashboard
+        run: |
+          git config user.name "polytrade-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -f polytrade.db dashboard.html
+          if git diff --cached --quiet; then
+            echo "No changes this cycle."
+          else
+            git commit -m "cycle $(date -u +%Y-%m-%dT%H:%MZ)"
+            git push
+          fi

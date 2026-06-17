@@ -1,0 +1,9 @@
+# NOTE: polytrade.db and dashboard.html ARE committed on purpose so the cloud
+# runner keeps your prediction history and dashboard between scheduled runs.
+# The .env file (your API key) is NEVER committed — it stays listed below.
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.claude/
