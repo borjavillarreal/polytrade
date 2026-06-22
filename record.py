@@ -341,7 +341,13 @@ def realized_pnl_total(conn: sqlite3.Connection) -> float:
 
 
 def candidate_entries(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """Open predictions we don't already hold, joined to a current market price."""
+    """Open predictions we don't currently hold, joined to a current market price.
+
+    Only currently-open positions are excluded — a market we've previously exited
+    is eligible to be re-entered if it shows a fresh edge again (the entry-edge
+    filter in paper_trading guards against churn). This lets the bot recycle into
+    markets it traded before, rather than permanently retiring them.
+    """
     return conn.execute(
         """
         SELECT p.market_id, p.question, p.model_prob, p.target_outcome,
@@ -350,6 +356,5 @@ def candidate_entries(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         JOIN markets m ON m.market_id = p.market_id
         WHERE p.resolved = 0
           AND p.market_id NOT IN (SELECT market_id FROM positions)
-          AND p.market_id NOT IN (SELECT DISTINCT market_id FROM trades)
         """
     ).fetchall()

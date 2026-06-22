@@ -38,6 +38,11 @@ try:
 except ImportError:
     sys.exit("The 'anthropic' package is required: pip install -r requirements.txt")
 
+# Conservative upper bound on a single analysis call's cost. Used only to decide
+# whether starting another call could breach a budget cap, so the caps are never
+# exceeded (we stop BEFORE a call that might push us over).
+_EST_CALL_USD = 0.25
+
 
 SYSTEM_PROMPT = (
     "You are a calibrated probability forecaster for prediction markets. You are "
@@ -222,10 +227,15 @@ def main() -> None:
     pending = record.markets_without_predictions(conn)
     to_analyze = pending[: config.MAX_ANALYZE_PER_RUN]
 
+    # Budget guard: cumulative $ spent across ALL predictions ever (the lifetime
+    # cap is the master safety limit), plus a fresh per-cycle cap.
+    lifetime_before = record.total_token_cost(conn)
+
     analyzed = 0
     skipped = 0
     failed = 0
     run_cost = 0.0
+    budget_stop = None
 
     try:
         for row in to_analyze:
@@ -233,6 +243,16 @@ def main() -> None:
             if record.prediction_exists(conn, row["market_id"]):
                 skipped += 1
                 continue
+
+            # Stop BEFORE any call that could breach a budget cap.
+            if run_cost + _EST_CALL_USD > config.MAX_ANALYSIS_USD_PER_CYCLE:
+                budget_stop = (f"per-cycle cap ${config.MAX_ANALYSIS_USD_PER_CYCLE:.2f} "
+                               f"reached (spent ${run_cost:.2f} this run)")
+                break
+            if lifetime_before + run_cost + _EST_CALL_USD > config.MAX_LIFETIME_ANALYSIS_USD:
+                budget_stop = (f"lifetime cap ${config.MAX_LIFETIME_ANALYSIS_USD:.2f} "
+                               f"reached (spent ${lifetime_before + run_cost:.2f} total)")
+                break
 
             print(f"[{analyzed + failed + 1}/{len(to_analyze)}] {row['question'][:70]}")
             result = call_model(client, row)
@@ -276,8 +296,12 @@ def main() -> None:
         open_preds = record.open_prediction_count(conn)
         resolved = len(record.resolved_predictions(conn))
         lifetime_cost = record.total_token_cost(conn)
+        remaining = len(record.markets_without_predictions(conn))
     finally:
         conn.close()
+
+    if budget_stop:
+        print(f"  [budget] stopped early: {budget_stop}")
 
     print("=" * 60)
     print("analyze.py summary")
@@ -286,8 +310,9 @@ def main() -> None:
     print(f"  markets analyzed (new) : {analyzed}")
     print(f"  skipped (already done) : {skipped}")
     print(f"  failed                 : {failed}")
-    print(f"  this-run token cost    : ${run_cost:.4f}")
-    print(f"  lifetime token cost    : ${lifetime_cost:.4f}")
+    print(f"  awaiting analysis      : {remaining}")
+    print(f"  this-run token cost    : ${run_cost:.4f}  (cap ${config.MAX_ANALYSIS_USD_PER_CYCLE:.2f}/cycle)")
+    print(f"  lifetime token cost    : ${lifetime_cost:.4f}  (cap ${config.MAX_LIFETIME_ANALYSIS_USD:.2f})")
     print(f"  open predictions       : {open_preds}")
     print(f"  scored so far          : {resolved}")
 
