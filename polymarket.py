@@ -32,7 +32,19 @@ import requests
 import config
 
 _session = requests.Session()
-_session.headers.update({"User-Agent": config.HTTP_USER_AGENT})
+# Polymarket's Gamma API rejects requests that don't look like a browser with a
+# 403. Send a full browser-style header set so the read-only public endpoints
+# accept us. (Still no auth, no credentials — these are public reads.)
+_session.headers.update({
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin": "https://polymarket.com",
+    "Referer": "https://polymarket.com/",
+})
 
 
 def _get(url: str, params: Optional[dict] = None) -> Any:

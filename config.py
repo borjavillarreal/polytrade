@@ -38,16 +38,21 @@ PRICE_WEB_SEARCH_PER_1K = 10.00
 # Market selection (fetch_markets.py)
 # --------------------------------------------------------------------------
 # Only consider markets with at least this much total USD volume (liquidity proxy).
-MIN_VOLUME_USD = 20_000.0
+# Low floor on purpose: we want broad coverage incl. long shots, but skip markets
+# with essentially no volume — those can't realistically be traded.
+MIN_VOLUME_USD = 1_000.0
 
 # Resolution-date window: markets must resolve between N and M days from the
-# fetch timestamp. Short enough to score within the experiment, long enough that
-# the outcome is genuinely uncertain.
-MIN_DAYS_TO_RESOLUTION = 14
-MAX_DAYS_TO_RESOLUTION = 45
+# fetch timestamp. Wide window = a large pool with a mix of fast-resolving and
+# longer-dated markets, which keeps the paper trader active and recycling capital.
+MIN_DAYS_TO_RESOLUTION = 1
+MAX_DAYS_TO_RESOLUTION = 120
 
-# Stop after collecting this many qualifying markets in one fetch run.
-MAX_MARKETS_PER_FETCH = 40
+# Stop after collecting this many qualifying markets in one fetch run. Storing a
+# market is free (DB only); the real cost guard is the analysis budget below, so
+# this is set high to build a broad candidate pool. Markets are volume-sorted, so
+# the most liquid/tradeable ones are stored first.
+MAX_MARKETS_PER_FETCH = 1000
 
 # How many markets the Gamma API returns per page while we scan.
 GAMMA_PAGE_LIMIT = 100
@@ -57,8 +62,18 @@ GAMMA_MAX_PAGES = 40
 # --------------------------------------------------------------------------
 # Analysis run limits (analyze.py)
 # --------------------------------------------------------------------------
-# Max markets to analyze in a single analyze.py run (cost guardrail).
-MAX_ANALYZE_PER_RUN = 50
+# Max markets to analyze in a single analyze.py run (count guardrail). The dollar
+# budget caps below usually bind first, but this caps the loop length regardless.
+MAX_ANALYZE_PER_RUN = 250
+
+# --- ANALYSIS BUDGET CAPS (real $ spent on the Anthropic API) ----------------
+# Each analysis (Sonnet + news web search) costs ~$0.10 on average. These caps are
+# hard ceilings so a large market backlog can never run up a surprise bill.
+#   * Per-cycle cap: analyze.py stops once this run's estimated spend reaches it.
+#   * Lifetime cap: analyze.py stops once cumulative spend (all predictions ever,
+#     summed from the DB) reaches it. This is the master safety limit.
+MAX_ANALYSIS_USD_PER_CYCLE = 10.0
+MAX_LIFETIME_ANALYSIS_USD = 30.0
 
 # Seconds to sleep between Anthropic calls (simple client-side rate limiting).
 ANALYZE_RATE_LIMIT_SECONDS = 2.0
@@ -89,17 +104,29 @@ STARTING_CAPITAL = 1000.0          # fictional starting bankroll (USD)
 
 # Entry: open a position when the LIVE edge (model_prob - current price) exceeds
 # this. Direction is LONG (buy "Yes") if the model thinks Yes is underpriced,
-# SHORT (buy "No") if overpriced.
-TRADE_ENTRY_EDGE = 0.10
-# Risk sizing: stake this fraction of current total equity per new position...
-POSITION_SIZE_FRACTION = 0.10
+# SHORT (buy "No") if overpriced. Lower = more active (more trades qualify).
+TRADE_ENTRY_EDGE = 0.05
+# Risk sizing: stake this fraction of current total equity per new position. Small
+# so the bankroll spreads across many positions (diversification + deployment)...
+POSITION_SIZE_FRACTION = 0.06
 # ...capped at this many dollars, and never more than available cash.
 MAX_POSITION_USD = 150.0
-# Skip a side priced outside this band (avoid illiquid longshots / no-upside).
-MIN_ENTRY_PRICE = 0.05
-MAX_ENTRY_PRICE = 0.95
+# Don't bother opening a position smaller than this (avoids dust trades).
+MIN_TRADE_STAKE_USD = 5.0
+# Price band for the side we'd buy. Wide on purpose to allow long shots; we still
+# avoid the extreme tails where there's effectively no market.
+MIN_ENTRY_PRICE = 0.02
+MAX_ENTRY_PRICE = 0.98
 # At most this many open positions at once (diversification + cash control).
-MAX_OPEN_POSITIONS = 12
+MAX_OPEN_POSITIONS = 30
+
+# --- Capital recycling --------------------------------------------------------
+# When a new candidate's edge beats an open position's REMAINING edge by at least
+# this margin, and there's no free cash (or we're at the position cap), sell the
+# weakest open position(s) to fund the better trade. Keeps the bankroll working in
+# the highest-edge opportunities instead of sitting idle.
+ROTATE_ENABLED = True
+ROTATE_EDGE_IMPROVEMENT = 0.05
 
 # Exits (whichever triggers first):
 TAKE_PROFIT_PCT = 0.40             # close when a position is up >= 40%

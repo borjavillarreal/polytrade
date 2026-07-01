@@ -62,6 +62,7 @@ def main() -> None:
     conn.close()
 
     # --- pipeline (each step manages its own DB connection + prints a summary) ---
+    step_failures = []
     for name, fn in (("fetch_markets", fetch_markets.main),
                      ("analyze", analyze.main),
                      ("score", score.main)):
@@ -71,6 +72,7 @@ def main() -> None:
             print(f"  [{name}] skipped: {exc}")
         except Exception as exc:          # never let one step kill the whole cycle
             print(f"  [{name}] failed: {exc}")
+            step_failures.append((name, str(exc)))
 
     # paper-trading simulation (fictional money — no real trades)
     trade_summary = None
@@ -121,6 +123,10 @@ def main() -> None:
     # alerts.txt into a GitHub issue that emails you. Cleared when nothing is new,
     # so you never get re-emailed about markets you've already been told about.
     alert_lines = []
+    # Surface pipeline failures loudly — a silently failing fetch_markets means
+    # the candidate pool goes stale and no new trades ever appear.
+    for name, err in step_failures:
+        alert_lines.append(f"- PIPELINE FAILURE in {name}: {err[:200]}")
     for r in sorted(new_big, key=lambda x: abs(x["edge"]), reverse=True):
         alert_lines.append(
             f"- {r['question']}\n    model {r['model_prob']:.2f} vs market "

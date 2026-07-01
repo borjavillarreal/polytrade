@@ -39,6 +39,34 @@ def _settle_value(side: str, shares: float, outcome: float) -> float:
     return shares * (outcome if side == "LONG" else (1.0 - outcome))
 
 
+def _remaining_edge(side: str, model_prob: float, yes_price: float) -> float:
+    """How much edge a held position still has, in its own direction.
+
+    LONG profits as Yes rises toward model_prob; SHORT as Yes falls toward it.
+    A small/negative value means the thesis has largely played out (or broken) —
+    i.e. a weak position, the first to be sold when funding a better trade.
+    """
+    return (model_prob - yes_price) if side == "LONG" else (yes_price - model_prob)
+
+
+def _liquidate(conn, info: dict, now: str, reason: str, summary: dict) -> float:
+    """Sell an open position at its current mark. Returns cash proceeds (net of fee)."""
+    pos = info["pos"]
+    current_value = info["current_value"]
+    fee = current_value * config.TRADE_FEE_PCT
+    proceeds = current_value - fee
+    realized = proceeds - float(pos["cost_basis"])
+    record.insert_trade(conn, {
+        "timestamp": now, "market_id": pos["market_id"], "question": pos["question"],
+        "action": "SELL", "side": pos["side"], "shares": float(pos["shares"]),
+        "price": info["side_price"], "cash_delta": proceeds, "fee": fee,
+        "realized_pnl": realized, "reason": reason,
+    })
+    record.close_position(conn, pos["market_id"])
+    summary["sells"].append({"question": pos["question"], "pnl": realized, "reason": reason})
+    return proceeds
+
+
 def run(conn) -> dict:
     """Run one paper-trading cycle. Returns a summary dict (also used for alerts)."""
     summary = {"buys": [], "sells": [], "settles": [], "equity": None,
@@ -54,6 +82,7 @@ def run(conn) -> dict:
     starting = float(pf["starting_cash"])
 
     # ---- 1 & 2: mark + exit open positions ----
+    held: dict[str, dict] = {}  # market_id -> live info for surviving positions
     for pos in record.open_positions(conn):
         snap = None
         try:
@@ -111,11 +140,14 @@ def run(conn) -> dict:
                                      "reason": reason})
         else:
             record.mark_position(conn, pos["market_id"], side_price, current_value, now)
+            held[pos["market_id"]] = {
+                "pos": pos, "side_price": side_price, "current_value": current_value,
+                "rem_edge": _remaining_edge(side, float(pos["model_prob"]), yes_price),
+            }
 
-    # ---- 3: open new positions on live edges ----
-    open_count = len(record.open_positions(conn))
-    positions_value = sum(float(p["last_value"] or 0) for p in record.open_positions(conn))
-    equity = cash + positions_value
+    # ---- 3: open new positions on live edges (recycling capital as needed) ----
+    open_count = len(held)
+    equity = cash + sum(h["current_value"] for h in held.values())
 
     candidates = []
     for row in record.candidate_entries(conn):
@@ -127,19 +159,37 @@ def run(conn) -> dict:
             candidates.append((abs(live_edge), live_edge, row, price))
     candidates.sort(key=lambda c: c[0], reverse=True)
 
-    for _, live_edge, row, price in candidates:
-        if open_count >= config.MAX_OPEN_POSITIONS:
-            break
+    for cand_edge, live_edge, row, price in candidates:
         side = "LONG" if live_edge > 0 else "SHORT"
         side_price = price if side == "LONG" else (1.0 - price)
         if side_price < config.MIN_ENTRY_PRICE or side_price > config.MAX_ENTRY_PRICE:
             continue
 
-        stake = min(config.POSITION_SIZE_FRACTION * equity, config.MAX_POSITION_USD)
+        desired = min(config.POSITION_SIZE_FRACTION * equity, config.MAX_POSITION_USD)
+
+        # --- capital recycling: free room / cash by selling weaker positions ---
+        # Sell the weakest open position(s) whose remaining edge is beaten by this
+        # candidate by at least ROTATE_EDGE_IMPROVEMENT, until we have a slot and
+        # enough cash to fund the desired stake.
+        if config.ROTATE_ENABLED:
+            while held and (
+                open_count >= config.MAX_OPEN_POSITIONS
+                or cash / (1.0 + config.TRADE_FEE_PCT) < min(desired, config.MIN_TRADE_STAKE_USD)
+            ):
+                mid, weakest = min(held.items(), key=lambda kv: kv[1]["rem_edge"])
+                if weakest["rem_edge"] > cand_edge - config.ROTATE_EDGE_IMPROVEMENT:
+                    break  # nothing weak enough to justify rotating out
+                cash += _liquidate(conn, weakest, now, "rotate", summary)
+                del held[mid]
+                open_count -= 1
+
+        if open_count >= config.MAX_OPEN_POSITIONS:
+            continue  # full and nothing weak enough to swap out
+
         affordable = cash / (1.0 + config.TRADE_FEE_PCT)
-        stake = min(stake, affordable)
-        if stake < 1.0:
-            continue  # out of meaningful cash
+        stake = min(desired, affordable)
+        if stake < config.MIN_TRADE_STAKE_USD:
+            continue  # out of meaningful cash and nothing to rotate
 
         shares = stake / side_price
         fee = stake * config.TRADE_FEE_PCT

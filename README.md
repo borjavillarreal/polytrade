@@ -40,8 +40,8 @@ known, freeze the market price at that moment, then wait for reality.
 
 This harness enforces that discipline:
 
-- It selects markets that resolve **14–45 days out** — far enough that the answer
-  is genuinely unknown, near enough to score within the experiment.
+- It selects markets that resolve **1–120 days out** — a wide window that keeps a
+  large, active pool with a mix of fast- and slower-resolving markets.
 - It **freezes `market_prob`** at decision time and never overwrites it.
 - It instructs the model to reason only from information available **as of the
   fetch timestamp**, and to **ignore any source that appears to state the final
@@ -158,11 +158,17 @@ fictional `STARTING_CAPITAL` (default $1,000) and, every cycle:
    outcome).
 3. **Enters** new positions where the model still sees a live edge
    (`model_prob − current price > TRADE_ENTRY_EDGE`), sized as
-   `POSITION_SIZE_FRACTION` of equity, capped by `MAX_POSITION_USD` and cash.
-4. Records total value to an **equity-curve timeline**.
+   `POSITION_SIZE_FRACTION` of equity, capped by `MAX_POSITION_USD` and cash, up
+   to `MAX_OPEN_POSITIONS` at once.
+4. **Recycles capital** (when `ROTATE_ENABLED`): if a new candidate's edge beats
+   an open position's *remaining* edge by at least `ROTATE_EDGE_IMPROVEMENT` and
+   there's no free cash or slot, it sells the weakest position(s) to fund the
+   better trade.
+5. Records total value to an **equity-curve timeline**.
 
 It buys "Yes" (LONG) when the model thinks Yes is underpriced and "No" (SHORT)
-when overpriced. Every market is traded at most once (no churn). A configurable
+when overpriced. Markets exited earlier can be re-entered if they show a fresh
+edge again (the entry-edge threshold guards against churn). A configurable
 `TRADE_FEE_PCT` approximates spread/slippage so results aren't unrealistically
 rosy. The dashboard shows the equity chart, open positions, and a full movements
 ledger.
@@ -197,6 +203,11 @@ All in `config.py`: `ANTHROPIC_MODEL` (default `claude-sonnet-4-6`),
 `MIN_VOLUME_USD`, the `MIN/MAX_DAYS_TO_RESOLUTION` window, `MAX_ANALYZE_PER_RUN`,
 `EDGE_THRESHOLD`, `BET_SIZE_USD`, rate-limit and backoff settings, and the list
 prices used for cost estimation.
+
+**Analysis budget caps** (real `$` spent on the API): `MAX_ANALYSIS_USD_PER_CYCLE`
+and `MAX_LIFETIME_ANALYSIS_USD` are hard ceilings — `analyze.py` stops before any
+call that would breach them, so a large market backlog can never run up a surprise
+bill. Each analysis (Sonnet + news web search) costs ~$0.10 on average.
 
 ---
 
