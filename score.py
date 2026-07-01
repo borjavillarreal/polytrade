@@ -23,7 +23,28 @@ import record
 # --------------------------------------------------------------------------
 # Step 1: resolve matured markets
 # --------------------------------------------------------------------------
+def reconcile_paper_settlements(conn) -> int:
+    """Mark predictions resolved when the paper trader already settled them.
+
+    Covers markets that Polymarket closed BEFORE their scheduled resolution_date:
+    the paper trader catches those early closes, but the date-gated resolve pass
+    below does not. Uses the outcome already stored on the SETTLE trade, so it
+    makes no network call. Returns how many rows it backfilled."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    backfilled = 0
+    for row in record.paper_settled_unresolved(conn):
+        outcome = row["outcome"]
+        if outcome is None or not (0.0 <= outcome <= 1.0):
+            continue
+        record.mark_resolved(conn, row["market_id"], outcome, now_iso)
+        backfilled += 1
+    if backfilled:
+        conn.commit()
+    return backfilled
+
+
 def resolve_due(conn) -> tuple[int, int]:
+    reconcile_paper_settlements(conn)
     now_iso = datetime.now(timezone.utc).isoformat()
     due = record.unresolved_due(conn, now_iso)
     newly_resolved = 0

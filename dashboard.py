@@ -12,7 +12,9 @@ what's already stored.
 
 import html
 import json
+import math
 import os
+import re
 import webbrowser
 from datetime import datetime, timezone
 
@@ -57,7 +59,8 @@ def _equity_svg(rows: list, starting: float) -> str:
 
     poly = " ".join(f"{fx(i):.1f},{fy(v):.1f}" for i, v in enumerate(values))
     last = values[-1]
-    color = "#4ade80" if last >= starting else "#f87171"
+    # Color is driven by a CSS variable so the light/dark toggle recolors it too.
+    line_var = "var(--good)" if last >= starting else "var(--bad)"
     by = fy(starting)
 
     # Points fed to the hover handler: [viewBox_x, viewBox_y, value, "date"].
@@ -69,24 +72,26 @@ def _equity_svg(rows: list, starting: float) -> str:
 
     return (
         f'<div class="chartwrap">'
-        f'<svg id="eqsvg" viewBox="0 0 {W} {H}" style="width:100%;height:auto;'
-        f'background:#11161d;border:1px solid #232a34;border-radius:10px">'
-        f'<line x1="{pl}" y1="{by:.1f}" x2="{W - pr}" y2="{by:.1f}" stroke="#3a4452" '
+        f'<svg id="eqsvg" class="linechart" viewBox="0 0 {W} {H}" '
+        f'style="width:100%;height:auto">'
+        f'<line class="grid" x1="{pl}" y1="{by:.1f}" x2="{W - pr}" y2="{by:.1f}" '
         f'stroke-dasharray="4 4"/>'
-        f'<text x="{pl - 6}" y="{by + 3:.1f}" fill="#8a94a3" font-size="11" '
+        f'<text class="ax" x="{pl - 6}" y="{by + 3:.1f}" font-size="11" '
         f'text-anchor="end">${starting:,.0f}</text>'
-        f'<text x="{pl - 6}" y="{pt + 8:.1f}" fill="#8a94a3" font-size="11" '
+        f'<text class="ax" x="{pl - 6}" y="{pt + 8:.1f}" font-size="11" '
         f'text-anchor="end">${vmax:,.0f}</text>'
-        f'<text x="{pl - 6}" y="{pt + ph:.1f}" fill="#8a94a3" font-size="11" '
+        f'<text class="ax" x="{pl - 6}" y="{pt + ph:.1f}" font-size="11" '
         f'text-anchor="end">${vmin:,.0f}</text>'
-        f'<polyline points="{poly}" fill="none" stroke="{color}" stroke-width="2"/>'
-        f'<circle cx="{fx(n - 1):.1f}" cy="{fy(last):.1f}" r="3.5" fill="{color}"/>'
-        f'<text x="{W - pr}" y="{fy(last) - 7:.1f}" fill="{color}" font-size="12" '
-        f'text-anchor="end">${last:,.0f}</text>'
+        f'<polyline points="{poly}" fill="none" style="stroke:{line_var}" '
+        f'stroke-width="2"/>'
+        f'<circle cx="{fx(n - 1):.1f}" cy="{fy(last):.1f}" r="3.5" '
+        f'style="fill:{line_var}"/>'
+        f'<text x="{W - pr}" y="{fy(last) - 7:.1f}" style="fill:{line_var}" '
+        f'font-size="12" text-anchor="end">${last:,.0f}</text>'
         # hover crosshair + snap dot (hidden until the mouse is over the chart)
-        f'<line id="eqguide" y1="{pt}" y2="{pt + ph}" stroke="#5b6675" '
+        f'<line id="eqguide" class="crosshair" y1="{pt}" y2="{pt + ph}" '
         f'stroke-width="1" visibility="hidden"/>'
-        f'<circle id="eqdot" r="4" fill="{color}" stroke="#0f1216" '
+        f'<circle id="eqdot" r="4" style="fill:{line_var}" class="snapdot" '
         f'stroke-width="1.5" visibility="hidden"/>'
         # transparent hit area on top so mouse events fire anywhere on the chart
         f'<rect id="eqhit" x="{pl}" y="{pt}" width="{pw}" height="{ph}" '
@@ -140,6 +145,141 @@ def _interpret_side(question: str, side: str) -> str:
     return html.escape(side or "")
 
 
+def _money_signed(x: float) -> str:
+    """'+$12.34' / '-$5.00' — sign first, then the dollar sign."""
+    return f'{"+" if x >= 0 else "-"}${abs(x):,.2f}'
+
+
+def _position_modal_html(question, side, model_p, market_p, edge, conf, reasoning,
+                         url, value, pnl_d, pnl_pct, entry_p, now_p) -> str:
+    """Pre-render the click-through detail for one open position (no JS assembly).
+
+    Everything shown here is already on disk — the reasoning was frozen by
+    analyze.py — so opening this costs nothing and makes no model call."""
+    def _pct(x):
+        return "&ndash;" if x is None else f"{x * 100:.0f}%"
+    edge_txt = "&ndash;" if edge is None else f'{edge * 100:+.0f} pts'
+    pcls = "good" if pnl_d >= 0 else "bad"
+    return (
+        f'<h3 class="pm-q">{html.escape(question)}</h3>'
+        f'<div class="pm-interp">{_interpret_side(question, side)}</div>'
+        f'<div class="pm-nums">'
+        f'<span>side <b>{html.escape(side)}</b></span>'
+        f'<span>value <b>${value:,.2f}</b></span>'
+        f'<span>P&amp;L <b class="{pcls}">{_money_signed(pnl_d)} ({pnl_pct:+.0%})</b></span>'
+        f'<span>entry <b>{entry_p:.2f}</b></span>'
+        f'<span>now <b>{now_p:.2f}</b></span></div>'
+        f'<div class="pm-nums">'
+        f'<span>model P(yes) <b>{_pct(model_p)}</b></span>'
+        f'<span>market P(yes) <b>{_pct(market_p)}</b></span>'
+        f'<span>edge <b>{edge_txt}</b></span>'
+        f'<span>confidence <b>{html.escape(conf)}</b></span></div>'
+        f'<a class="pm-link" href="{html.escape(url)}" target="_blank" '
+        f'rel="noopener noreferrer">View this market on Polymarket &#8599;</a>'
+        f'<div class="pm-label">Model reasoning at decision time</div>'
+        f'<div class="pm-reason">{html.escape(reasoning)}</div>'
+    )
+
+
+def _polymarket_url(question: str) -> str:
+    """Best-effort Polymarket event URL from the question text.
+
+    Polymarket event slugs are the lowercased title with apostrophes dropped and
+    every other run of non-alphanumerics collapsed to a single hyphen. E.g.
+    'Strait of Hormuz traffic returns to normal by July 15?' ->
+    strait-of-hormuz-traffic-returns-to-normal-by-july-15."""
+    s = (question or "").lower().replace("’", "'").replace("'", "")
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    return f"https://polymarket.com/event/{s}"
+
+
+_PIE_COLORS = ["#6ea8fe", "#f4a261", "#4ade80", "#e879f9", "#facc15", "#f87171",
+               "#34d399", "#a78bfa", "#fb923c", "#38bdf8", "#fb7185", "#a3e635"]
+
+
+def _pie_svg(slices: list) -> str:
+    """Donut chart of open positions sized by current value. Each slice reveals
+    its market name (and value / share) ONLY on hover — no always-on labels.
+
+    `slices` is a list of dicts: {name, value}. Pure client-side rendering."""
+    slices = [s for s in slices if float(s["value"]) > 0]
+    if not slices:
+        return ('<div class="empty">No open positions to chart right now.</div>')
+    total = sum(float(s["value"]) for s in slices)
+    cx, cy, R, r = 130, 130, 116, 66
+    paths = []
+    data = []
+    a0 = -math.pi / 2
+    for i, s in enumerate(slices):
+        val = float(s["value"])
+        frac = val / total
+        color = _PIE_COLORS[i % len(_PIE_COLORS)]
+        if len(slices) == 1:
+            # A single position is a full ring; arc math degenerates, so draw circles.
+            seg = (f'<circle cx="{cx}" cy="{cy}" r="{(R + r) / 2:.1f}" fill="none" '
+                   f'stroke="{color}" stroke-width="{R - r}" class="slice" '
+                   f'data-i="{i}"/>')
+        else:
+            a1 = a0 + frac * 2 * math.pi
+            x0, y0 = cx + R * math.cos(a0), cy + R * math.sin(a0)
+            x1, y1 = cx + R * math.cos(a1), cy + R * math.sin(a1)
+            xi1, yi1 = cx + r * math.cos(a1), cy + r * math.sin(a1)
+            xi0, yi0 = cx + r * math.cos(a0), cy + r * math.sin(a0)
+            large = 1 if (a1 - a0) > math.pi else 0
+            seg = (f'<path d="M{x0:.2f},{y0:.2f} A{R},{R} 0 {large} 1 {x1:.2f},{y1:.2f} '
+                   f'L{xi1:.2f},{yi1:.2f} A{r},{r} 0 {large} 0 {xi0:.2f},{yi0:.2f} Z" '
+                   f'fill="{color}" class="slice" data-i="{i}"/>')
+            a0 = a1
+        paths.append(seg)
+        data.append({"name": s["name"], "value": val, "pct": frac})
+    data_json = json.dumps(data).replace("</", "<\\/")
+    return (
+        f'<div class="chartwrap piewrap">'
+        f'<svg id="piesvg" viewBox="0 0 260 260" style="width:260px;max-width:100%;'
+        f'height:auto">{"".join(paths)}'
+        f'<text id="pie-cn" class="pie-center-n" x="130" y="126" text-anchor="middle">'
+        f'{len(slices)}</text>'
+        f'<text id="pie-cl" class="pie-center-l" x="130" y="144" text-anchor="middle">'
+        f'open</text></svg>'
+        f'<div id="pietip" class="chart-tip"></div>'
+        f'<script>(function(){{var D={data_json};'
+        f'var svg=document.getElementById("piesvg"),tip=document.getElementById("pietip"),'
+        f'cn=document.getElementById("pie-cn"),cl=document.getElementById("pie-cl");'
+        f'var slices=svg.querySelectorAll(".slice");'
+        f'function money(v){{return "$"+Number(v).toLocaleString(undefined,'
+        f'{{maximumFractionDigits:0}});}}'
+        f'slices.forEach(function(el){{'
+        f'el.addEventListener("mousemove",function(e){{'
+        f'var d=D[+el.getAttribute("data-i")];'
+        f'slices.forEach(function(o){{o.style.opacity=(o===el)?"1":"0.35";}});'
+        f'cn.textContent=money(d.value);cl.textContent=(d.pct*100).toFixed(0)+"% of book";'
+        f'var r=svg.getBoundingClientRect();'
+        f'tip.style.display="block";tip.style.left=(e.clientX-r.left)+"px";'
+        f'tip.style.top=(e.clientY-r.top)+"px";'
+        f'tip.innerHTML="<b>"+d.name.replace(/</g,"&lt;")+"</b><span>"+money(d.value)+'
+        f'" &middot; "+(d.pct*100).toFixed(0)+"%</span>";'
+        f'}});'
+        f'el.addEventListener("mouseleave",function(){{'
+        f'slices.forEach(function(o){{o.style.opacity="1";}});'
+        f'tip.style.display="none";cn.textContent="{len(slices)}";cl.textContent="open";'
+        f'}});}});'
+        f'}})();</script></div>'
+    )
+
+
+def _annualized(ret: float, created_at: str, now: datetime):
+    """Linear (simple, non-compounding) annualization, per the user's mental model:
+    +2% over one month reads as +24%/yr. Returns (annual_ret, days_elapsed)."""
+    try:
+        start = datetime.fromisoformat(created_at)
+    except (TypeError, ValueError):
+        return None, None
+    days = max((now - start).total_seconds() / 86400.0, 1e-9)
+    if days < 0.5:
+        return None, days  # too little history to extrapolate meaningfully
+    return ret * (365.0 / days), days
+
+
 def _portfolio_section(conn) -> str:
     pf = record.get_portfolio(conn)
     if not pf:
@@ -159,17 +299,57 @@ def _portfolio_section(conn) -> str:
         total = cash + sum(float(p["last_value"] or 0) for p in positions)
     ret = (total - starting) / starting if starting else 0.0
     cls = "good" if total >= starting else "bad"
+    now = datetime.now(timezone.utc)
+    ann, days = _annualized(ret, pf["created_at"], now)
+    positions_value = sum(float(p["last_value"] or p["cost_basis"] or 0) for p in positions)
+    unrealized = sum(
+        float(p["last_value"] if p["last_value"] is not None else p["cost_basis"] or 0)
+        - float(p["cost_basis"] or 0) for p in positions)
+
+    # modal payloads (key -> pre-rendered HTML string), injected on click
+    modals = {}
 
     cards = [
         _stat_card("Starting", f"${starting:,.0f}"),
-        (f'<div class="card"><div class="label">Total equity</div>'
+        (f'<div class="card clickable-card" onclick="showModal(\'equity\')">'
+         f'<div class="label">Total equity <span class="more">details ›</span></div>'
          f'<div class="value {cls}">${total:,.2f}</div>'
          f'<div class="sub {cls}">{ret:+.1%}</div></div>'),
         _stat_card("Cash", f"${cash:,.2f}"),
-        _stat_card("Realized P&L", f"${realized:,.2f}"),
-        _stat_card("Open positions", str(len(positions))),
+        (f'<div class="card clickable-card" onclick="showModal(\'realized\')">'
+         f'<div class="label">Realized P&amp;L <span class="more">details ›</span></div>'
+         f'<div class="value {"good" if realized >= 0 else "bad"}">${realized:,.2f}</div>'
+         f'</div>'),
+        (f'<div class="card clickable-card" onclick="showModal(\'open\')">'
+         f'<div class="label">Open positions <span class="more">details ›</span></div>'
+         f'<div class="value">{len(positions)}</div></div>'),
     ]
     svg = _equity_svg(eq, starting)
+
+    # ---- Total-equity detail modal (ROI + linear annualized ROI + breakdown) ----
+    ann_txt = f'{ann:+.1%}' if ann is not None else '&ndash;'
+    days_txt = f'{days:.1f} days' if days is not None else '&ndash;'
+    start_txt = (pf["created_at"] or "")[:10]
+    modals["equity"] = (
+        f'<h3 class="pm-q">Total equity &mdash; ${total:,.2f}</h3>'
+        f'<div class="pm-nums">'
+        f'<span>starting <b>${starting:,.0f}</b></span>'
+        f'<span>return so far <b class="{cls}">{ret:+.1%}</b></span>'
+        f'<span>annualized (linear) <b class="{cls}">{ann_txt}</b></span></div>'
+        f'<div class="pm-nums">'
+        f'<span>held for <b>{days_txt}</b></span>'
+        f'<span>since <b>{html.escape(start_txt)}</b></span></div>'
+        f'<div class="pm-nums">'
+        f'<span>cash <b>${cash:,.2f}</b></span>'
+        f'<span>positions value <b>${positions_value:,.2f}</b></span>'
+        f'<span>realized P&amp;L <b class="{"good" if realized >= 0 else "bad"}">'
+        f'{_money_signed(realized)}</b></span>'
+        f'<span>unrealized P&amp;L <b class="{"good" if unrealized >= 0 else "bad"}">'
+        f'{_money_signed(unrealized)}</b></span></div>'
+        f'<div class="pm-note">Annualized is a simple linear extrapolation of the '
+        f'return so far (e.g. +2% in a month reads as +24%/yr), not a compounded '
+        f'CAGR. All figures are fictional paper money.</div>'
+    )
 
     # Reasoning is already frozen in the predictions table (written by analyze.py).
     # Joining to it here just displays what's on disk — no model call, no extra cost.
@@ -180,24 +360,39 @@ def _portfolio_section(conn) -> str:
 
     if positions:
         prows = []
-        detail_map = {}
+        open_rows = []   # richer rows for the "Open positions" detail modal
+        pie_slices = []
         for p in positions:
             mid = p["market_id"]
             cb = float(p["cost_basis"] or 0)
             lv = float(p["last_value"] if p["last_value"] is not None else cb)
-            upct = (lv - cb) / cb if cb else 0.0
-            pcls = "good" if lv >= cb else "bad"
+            pnl_d = lv - cb
+            upct = pnl_d / cb if cb else 0.0
+            pcls = "good" if pnl_d >= 0 else "bad"
+            side = p["side"] or ""
+            entry_p = float(p["entry_price"] or 0)
+            now_p = float(p["last_price"] or 0)
+            q = p["question"] or ""
             prows.append(
-                f'<tr class="clickable" onclick="showPos(\'{html.escape(mid)}\')" '
+                f'<tr class="clickable" onclick="showModal(\'pos:{html.escape(mid)}\')" '
                 f'title="Click for the reasoning behind this trade">'
-                f'<td class="q">{html.escape((p["question"] or "")[:68])}'
+                f'<td class="q">{html.escape(q[:60])}'
                 f'<span class="why-chip">why?</span></td>'
-                f'<td>{html.escape(p["side"] or "")}</td>'
-                f'<td>{float(p["entry_price"] or 0):.2f}</td>'
-                f'<td>{float(p["last_price"] or 0):.2f}</td>'
+                f'<td>{html.escape(side)}</td>'
+                f'<td>{entry_p:.2f}</td>'
+                f'<td>{now_p:.2f}</td>'
                 f'<td>${lv:,.0f}</td>'
+                f'<td class="{pcls}">{_money_signed(pnl_d)}</td>'
                 f'<td class="{pcls}">{upct:+.0%}</td></tr>'
             )
+            open_rows.append(
+                f'<tr><td class="q">{html.escape(q[:70])}</td><td>{html.escape(side)}</td>'
+                f'<td>{entry_p:.2f}</td><td>{now_p:.2f}</td><td>${lv:,.2f}</td>'
+                f'<td class="{pcls}">{_money_signed(pnl_d)}</td>'
+                f'<td class="{pcls}">{upct:+.0%}</td></tr>'
+            )
+            pie_slices.append({"name": q, "value": lv})
+
             pred = preds_by_id.get(mid)
             reasoning = (pred["model_reasoning"] if pred else "") or (
                 "No stored reasoning for this position.")
@@ -205,53 +400,33 @@ def _portfolio_section(conn) -> str:
             model_p = float(pred["model_prob"]) if pred else float(p["model_prob"] or 0)
             market_p = float(pred["market_prob"]) if pred else None
             edge = float(pred["edge"]) if pred else None
-            detail_map[mid] = {
-                "question": p["question"] or "",
-                "side": p["side"] or "",
-                "interp": _interpret_side(p["question"] or "", p["side"] or ""),
-                "model": model_p,
-                "market": market_p,
-                "edge": edge,
-                "conf": conf,
-                "reasoning": reasoning,
-            }
+            modals[f"pos:{mid}"] = _position_modal_html(
+                q, side, model_p, market_p, edge, conf, reasoning,
+                _polymarket_url(q), lv, pnl_d, upct, entry_p, now_p)
+
         pos_block = ('<h3>Open positions <span class="hint">(click a row for the '
-                     'reasoning &mdash; free, already stored)</span></h3>'
+                     'reasoning &amp; a link to Polymarket &mdash; free, already '
+                     'stored)</span></h3>'
                      '<table><thead><tr><th>market</th>'
                      '<th>side</th><th>entry</th><th>now</th><th>value</th>'
-                     '<th>P&amp;L</th></tr></thead><tbody>'
+                     '<th>P&amp;L $</th><th>P&amp;L %</th></tr></thead><tbody>'
                      + "".join(prows) + '</tbody></table>')
-        data_json = json.dumps(detail_map).replace("</", "<\\/")
-        pos_block += (
-            '<div id="posmodal" class="modal-backdrop" onclick="hidePos(event)">'
-            '<div class="modal" onclick="event.stopPropagation()">'
-            '<button class="modal-x" onclick="hidePos(event)" '
-            'aria-label="Close">&times;</button>'
-            '<div id="pm-body"></div></div></div>'
-            f'<script>var POS={data_json};'
-            'function showPos(id){var d=POS[id];if(!d)return;'
-            'var pct=function(x){return (x==null)?"&ndash;":(x*100).toFixed(0)+"%";};'
-            'var edge=(d.edge==null)?"&ndash;":((d.edge>=0?"+":"")+(d.edge*100).toFixed(0)+" pts");'
-            'var esc=function(s){var e=document.createElement("div");e.textContent=s;'
-            'return e.innerHTML;};'
-            'var h="<h3 class=\\"pm-q\\">"+esc(d.question)+"</h3>";'
-            'h+="<div class=\\"pm-interp\\">"+d.interp+"</div>";'
-            'h+="<div class=\\"pm-nums\\">"+'
-            '"<span>model P(yes) <b>"+pct(d.model)+"</b></span>"+'
-            '"<span>market P(yes) <b>"+pct(d.market)+"</b></span>"+'
-            '"<span>edge <b>"+edge+"</b></span>"+'
-            '"<span>confidence <b>"+esc(d.conf)+"</b></span>"+"</div>";'
-            'h+="<div class=\\"pm-label\\">Model reasoning at decision time</div>";'
-            'h+="<div class=\\"pm-reason\\">"+esc(d.reasoning)+"</div>";'
-            'document.getElementById("pm-body").innerHTML=h;'
-            'document.getElementById("posmodal").style.display="flex";}'
-            'function hidePos(e){if(e)e.stopPropagation();'
-            'document.getElementById("posmodal").style.display="none";}'
-            'document.addEventListener("keydown",function(e){'
-            'if(e.key==="Escape")hidePos();});</script>'
-        )
+
+        modals["open"] = (
+            f'<h3 class="pm-q">Open positions ({len(positions)})</h3>'
+            f'<div class="pm-note">Every open position with its live mark. Click a row '
+            f'in the main table for the model\'s full reasoning and a Polymarket link.'
+            f'</div><table class="pm-table"><thead><tr><th>market</th><th>side</th>'
+            f'<th>entry</th><th>now</th><th>value</th><th>P&amp;L $</th><th>P&amp;L %</th>'
+            f'</tr></thead><tbody>' + "".join(open_rows) + '</tbody></table>')
+
+        pie_block = ('<h3>Position mix <span class="hint">(by current value &mdash; '
+                     'hover a slice for the market)</span></h3>' + _pie_svg(pie_slices))
     else:
         pos_block = '<h3>Open positions</h3><div class="empty">None open right now.</div>'
+        pie_block = ''
+        modals["open"] = ('<h3 class="pm-q">Open positions (0)</h3>'
+                          '<div class="pm-note">None open right now.</div>')
 
     if trades:
         trows = []
@@ -277,10 +452,54 @@ def _portfolio_section(conn) -> str:
         ledger_block = ('<h3>Movements</h3><div class="empty">No trades yet — the first '
                         'positions open on the next cloud cycle.</div>')
 
+    # ---- Realized P&L detail modal (closed trades: sells + settlements) ----
+    closes = [t for t in record.get_trades(conn) if t["realized_pnl"] is not None]
+    if closes:
+        crows = "".join(
+            f'<tr><td>{html.escape((t["timestamp"] or "")[:16].replace("T", " "))}</td>'
+            f'<td>{html.escape(t["action"] or "")}</td>'
+            f'<td>{html.escape(t["side"] or "")}</td>'
+            f'<td class="q">{html.escape((t["question"] or "")[:60])}</td>'
+            f'<td class="{"good" if t["realized_pnl"] >= 0 else "bad"}">'
+            f'{_money_signed(float(t["realized_pnl"]))}</td>'
+            f'<td>{html.escape(t["reason"] or "")}</td></tr>'
+            for t in closes
+        )
+        modals["realized"] = (
+            f'<h3 class="pm-q">Realized P&amp;L &mdash; {_money_signed(realized)}</h3>'
+            f'<div class="pm-note">{len(closes)} closed trade(s). Realized P&amp;L is '
+            f'locked in when a position is sold (take-profit / stop-loss / edge) or '
+            f'settled at resolution.</div>'
+            f'<table class="pm-table"><thead><tr><th>when (UTC)</th><th>action</th>'
+            f'<th>side</th><th>market</th><th>P&amp;L</th><th>why</th></tr></thead>'
+            f'<tbody>{crows}</tbody></table>')
+    else:
+        modals["realized"] = (
+            f'<h3 class="pm-q">Realized P&amp;L &mdash; {_money_signed(realized)}</h3>'
+            f'<div class="pm-note">No positions have closed yet.</div>')
+
+    # ---- one modal for every clickable card / position row ----
+    modals_json = json.dumps(modals).replace("</", "<\\/")
+    modal_block = (
+        '<div id="pm-modal" class="modal-backdrop" onclick="hideModal(event)">'
+        '<div class="modal" onclick="event.stopPropagation()">'
+        '<button class="modal-x" onclick="hideModal(event)" aria-label="Close">'
+        '&times;</button><div id="pm-body"></div></div></div>'
+        f'<script>var PT_MODALS={modals_json};'
+        'function showModal(k){var h=PT_MODALS[k];if(!h)return;'
+        'document.getElementById("pm-body").innerHTML=h;'
+        'document.getElementById("pm-modal").style.display="flex";}'
+        'function hideModal(e){if(e)e.stopPropagation();'
+        'document.getElementById("pm-modal").style.display="none";}'
+        'document.addEventListener("keydown",function(e){'
+        'if(e.key==="Escape")hideModal();});</script>'
+    )
+
     return (f'<h2>Paper portfolio <span class="hint">(fictional ${starting:,.0f} — '
             f'no real money)</span></h2>'
             f'<div class="cards">{"".join(cards)}</div>'
-            f'<h3>Equity over time</h3>{svg}{pos_block}{ledger_block}')
+            f'<h3>Equity over time</h3>{svg}{pos_block}{pie_block}{ledger_block}'
+            f'{modal_block}')
 
 
 def _build_html(conn) -> str:
@@ -400,75 +619,138 @@ def _build_html(conn) -> str:
     portfolio_block = _portfolio_section(conn)
 
     return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Polytrade dashboard</title>
+<script>
+  /* set theme before first paint so there is no flash of the wrong mode */
+  (function(){{try{{var t=localStorage.getItem("pt-theme")||"dark";
+    document.documentElement.setAttribute("data-theme",t);}}catch(e){{
+    document.documentElement.setAttribute("data-theme","dark");}}}})();
+</script>
 <style>
-  :root {{ color-scheme: light dark; }}
+  /* ---- theme tokens: dark is default, [data-theme=light] is pastel ---- */
+  :root, :root[data-theme="dark"] {{
+    --bg:#0f1216; --panel:#1a1f27; --panel2:#11161d; --border:#262d38;
+    --border2:#232a34; --text:#e7ecf2; --muted:#8a94a3; --head:#c7d0db;
+    --good:#4ade80; --bad:#f87171; --accent:#6ea8fe; --chip-bd:#37404d;
+    --hover:#202632; --grid:#3a4452; --cross:#5b6675; --code:#232a34;
+    --tip-bg:#0b0e12; --tip-bd:#333c48; --scrim:rgba(5,7,10,.66); color-scheme: dark; }}
+  :root[data-theme="light"] {{
+    --bg:#f2f0fb; --panel:#ffffff; --panel2:#faf9ff; --border:#e6e2f2;
+    --border2:#ece9f6; --text:#2c2a3a; --muted:#7a768e; --head:#4a4660;
+    --good:#25955a; --bad:#d1495b; --accent:#5b6ee0; --chip-bd:#d9d4ec;
+    --hover:#f1eefb; --grid:#dcd7ee; --cross:#b7b0d4; --code:#efecfa;
+    --tip-bg:#ffffff; --tip-bd:#e0dbf1; --scrim:rgba(60,55,90,.30); color-scheme: light; }}
   body {{ font-family: -apple-system, system-ui, sans-serif; margin: 0;
-         background: #0f1216; color: #e7ecf2; }}
+         background: var(--bg); color: var(--text); }}
   .wrap {{ max-width: 980px; margin: 0 auto; padding: 28px 20px 60px; }}
+  .topbar {{ display: flex; align-items: flex-start; justify-content: space-between;
+            gap: 12px; }}
   h1 {{ font-size: 22px; margin: 0 0 2px; }}
-  .meta {{ color: #8a94a3; font-size: 13px; margin-bottom: 22px; }}
+  .meta {{ color: var(--muted); font-size: 13px; margin-bottom: 22px; }}
+  .theme-toggle {{ flex: none; background: var(--panel); color: var(--text);
+                  border: 1px solid var(--border); border-radius: 999px;
+                  padding: 7px 14px; font-size: 13px; cursor: pointer;
+                  font-family: inherit; }}
+  .theme-toggle:hover {{ border-color: var(--accent); }}
   .cards {{ display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; }}
-  .card {{ background: #1a1f27; border: 1px solid #262d38; border-radius: 12px;
+  .card {{ background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
           padding: 14px 16px; min-width: 130px; flex: 1; }}
   .card.wide {{ flex-basis: 100%; }}
-  .label {{ color: #8a94a3; font-size: 12px; text-transform: uppercase;
+  .clickable-card {{ cursor: pointer; transition: border-color .12s, transform .12s; }}
+  .clickable-card:hover {{ border-color: var(--accent); transform: translateY(-1px); }}
+  .more {{ color: var(--accent); font-size: 10px; letter-spacing: 0; text-transform: none; }}
+  .label {{ color: var(--muted); font-size: 12px; text-transform: uppercase;
            letter-spacing: .04em; }}
   .value {{ font-size: 26px; font-weight: 700; margin-top: 4px; }}
-  .sub {{ color: #8a94a3; font-size: 12px; }}
+  .sub {{ color: var(--muted); font-size: 12px; }}
   .row2 {{ display: flex; gap: 26px; margin-top: 8px; font-size: 18px; }}
   h2 {{ font-size: 15px; margin: 26px 0 8px; }}
-  h3 {{ font-size: 13px; margin: 18px 0 6px; color: #c7d0db; }}
-  .hint {{ color: #8a94a3; font-weight: 400; font-size: 12px; }}
+  h3 {{ font-size: 13px; margin: 18px 0 6px; color: var(--head); }}
+  .hint {{ color: var(--muted); font-weight: 400; font-size: 12px; }}
   table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
-  th, td {{ text-align: right; padding: 7px 10px; border-bottom: 1px solid #232a34; }}
+  th, td {{ text-align: right; padding: 7px 10px; border-bottom: 1px solid var(--border2); }}
   th:first-child, td.q {{ text-align: left; }}
-  th {{ color: #8a94a3; font-weight: 600; font-size: 11px; text-transform: uppercase; }}
-  .good {{ color: #4ade80; }}
-  .bad {{ color: #f87171; }}
-  .empty {{ background: #1a1f27; border: 1px dashed #2c3542; border-radius: 12px;
-           padding: 18px; color: #9aa4b2; font-size: 14px; }}
-  code {{ background: #232a34; padding: 1px 6px; border-radius: 5px; }}
-  .foot {{ margin-top: 34px; color: #6b7480; font-size: 12px; }}
-  /* interactive equity chart tooltip */
+  th {{ color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; }}
+  .good {{ color: var(--good); }}
+  .bad {{ color: var(--bad); }}
+  .empty {{ background: var(--panel); border: 1px dashed var(--border); border-radius: 12px;
+           padding: 18px; color: var(--muted); font-size: 14px; }}
+  code {{ background: var(--code); padding: 1px 6px; border-radius: 5px; }}
+  .foot {{ margin-top: 34px; color: var(--muted); font-size: 12px; }}
+  /* charts (equity line + position donut) */
   .chartwrap {{ position: relative; }}
+  .piewrap {{ display: flex; justify-content: center; }}
+  .linechart {{ background: var(--panel2); border: 1px solid var(--border2);
+               border-radius: 10px; }}
+  .ax {{ fill: var(--muted); }}
+  .grid {{ stroke: var(--grid); }}
+  .crosshair {{ stroke: var(--cross); }}
+  .snapdot {{ stroke: var(--bg); }}
+  .slice {{ cursor: pointer; transition: opacity .1s; }}
+  .pie-center-n {{ fill: var(--text); font-size: 22px; font-weight: 700; }}
+  .pie-center-l {{ fill: var(--muted); font-size: 11px; text-transform: uppercase;
+                  letter-spacing: .04em; }}
   .chart-tip {{ position: absolute; display: none; transform: translate(-50%, -125%);
-               pointer-events: none; background: #0b0e12; border: 1px solid #333c48;
+               pointer-events: none; background: var(--tip-bg); border: 1px solid var(--tip-bd);
                border-radius: 8px; padding: 6px 9px; font-size: 12px; white-space: nowrap;
-               box-shadow: 0 4px 14px rgba(0,0,0,.45); z-index: 5; }}
-  .chart-tip b {{ display: block; font-size: 14px; color: #e7ecf2; }}
-  .chart-tip span {{ color: #8a94a3; font-size: 11px; }}
+               box-shadow: 0 4px 14px rgba(0,0,0,.28); z-index: 5; max-width: 280px; }}
+  .chart-tip b {{ display: block; font-size: 13px; color: var(--text);
+                 white-space: normal; }}
+  .chart-tip span {{ color: var(--muted); font-size: 11px; }}
   /* clickable open-position rows */
   tr.clickable {{ cursor: pointer; }}
-  tr.clickable:hover td {{ background: #202632; }}
-  .why-chip {{ margin-left: 8px; font-size: 10px; color: #8a94a3;
-              border: 1px solid #37404d; border-radius: 999px; padding: 1px 7px;
+  tr.clickable:hover td {{ background: var(--hover); }}
+  .why-chip {{ margin-left: 8px; font-size: 10px; color: var(--muted);
+              border: 1px solid var(--chip-bd); border-radius: 999px; padding: 1px 7px;
               text-transform: uppercase; letter-spacing: .04em; vertical-align: middle; }}
-  tr.clickable:hover .why-chip {{ color: #cdd5df; border-color: #4a5563; }}
-  /* position-reasoning modal */
+  tr.clickable:hover .why-chip {{ color: var(--text); border-color: var(--accent); }}
+  /* modal shared by every clickable card / position */
   .modal-backdrop {{ display: none; position: fixed; inset: 0; z-index: 50;
-                    background: rgba(5,7,10,.66); align-items: center;
+                    background: var(--scrim); align-items: center;
                     justify-content: center; padding: 20px; }}
-  .modal {{ position: relative; background: #161b22; border: 1px solid #2a323d;
-           border-radius: 14px; max-width: 640px; width: 100%; max-height: 82vh;
-           overflow-y: auto; padding: 22px 24px 24px; box-shadow: 0 18px 50px rgba(0,0,0,.6); }}
+  .modal {{ position: relative; background: var(--panel); border: 1px solid var(--border);
+           border-radius: 14px; max-width: 660px; width: 100%; max-height: 82vh;
+           overflow-y: auto; padding: 22px 24px 24px; box-shadow: 0 18px 50px rgba(0,0,0,.35); }}
   .modal-x {{ position: absolute; top: 10px; right: 12px; background: none; border: none;
-             color: #8a94a3; font-size: 24px; line-height: 1; cursor: pointer; }}
-  .modal-x:hover {{ color: #e7ecf2; }}
-  .pm-q {{ font-size: 16px; color: #e7ecf2; margin: 2px 40px 12px 0; }}
-  .pm-interp {{ background: #1c2531; border: 1px solid #2a3644; border-radius: 10px;
-               padding: 11px 13px; font-size: 13.5px; line-height: 1.5; color: #d7dee8; }}
+             color: var(--muted); font-size: 24px; line-height: 1; cursor: pointer; }}
+  .modal-x:hover {{ color: var(--text); }}
+  .pm-q {{ font-size: 16px; color: var(--text); margin: 2px 40px 12px 0; }}
+  .pm-interp {{ background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
+               padding: 11px 13px; font-size: 13.5px; line-height: 1.5; color: var(--text); }}
   .pm-nums {{ display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 14px 0 4px;
-             font-size: 12.5px; color: #8a94a3; }}
-  .pm-nums b {{ color: #e7ecf2; }}
-  .pm-label {{ margin-top: 16px; color: #8a94a3; font-size: 11px; text-transform: uppercase;
+             font-size: 12.5px; color: var(--muted); }}
+  .pm-nums b {{ color: var(--text); }}
+  .pm-link {{ display: inline-block; margin-top: 14px; color: var(--accent);
+             font-size: 13px; text-decoration: none; font-weight: 600; }}
+  .pm-link:hover {{ text-decoration: underline; }}
+  .pm-label {{ margin-top: 16px; color: var(--muted); font-size: 11px; text-transform: uppercase;
               letter-spacing: .04em; }}
-  .pm-reason {{ margin-top: 6px; font-size: 13.5px; line-height: 1.6; color: #c7d0db;
+  .pm-reason {{ margin-top: 6px; font-size: 13.5px; line-height: 1.6; color: var(--head);
                white-space: pre-wrap; }}
+  .pm-note {{ color: var(--muted); font-size: 12.5px; line-height: 1.5; margin: 6px 0 4px; }}
+  .pm-table {{ margin-top: 10px; }}
 </style></head><body><div class="wrap">
-  <h1>Polytrade dashboard</h1>
-  <div class="meta">model {html.escape(config.ANTHROPIC_MODEL)} &middot; updated {updated}
-    &middot; paper-trading measurement &mdash; no real trades</div>
+  <div class="topbar">
+    <div><h1>Polytrade dashboard</h1>
+      <div class="meta">model {html.escape(config.ANTHROPIC_MODEL)} &middot; updated {updated}
+        &middot; paper-trading measurement &mdash; no real trades</div></div>
+    <button id="themebtn" class="theme-toggle" onclick="toggleTheme()">Theme</button>
+  </div>
+  <script>
+    function applyThemeLabel(t){{
+      var b=document.getElementById("themebtn");
+      if(b) b.textContent = (t==="light") ? "\\u2600 Light" : "\\u263E Dark";
+    }}
+    function toggleTheme(){{
+      var d=document.documentElement;
+      var t=(d.getAttribute("data-theme")==="light")?"dark":"light";
+      d.setAttribute("data-theme",t);
+      try{{ localStorage.setItem("pt-theme",t); }}catch(e){{}}
+      applyThemeLabel(t);
+    }}
+    applyThemeLabel(document.documentElement.getAttribute("data-theme")||"dark");
+  </script>
   <div class="cards">{''.join(cards)}</div>
   {portfolio_block}
   <h2>Model vs. market <span class="hint">(the underlying forecasting test)</span></h2>

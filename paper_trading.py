@@ -80,6 +80,10 @@ def run(conn) -> dict:
                 "fee": 0.0, "realized_pnl": realized, "reason": "resolved",
             })
             record.close_position(conn, pos["market_id"])
+            # Keep the predictions table in sync: a market can close BEFORE its
+            # scheduled resolution_date, which score.py's date-gated pass would
+            # otherwise miss. We already hold the outcome, so this is free.
+            record.mark_resolved(conn, pos["market_id"], snap["outcome"], now)
             summary["settles"].append({"question": pos["question"], "pnl": realized})
             continue
 

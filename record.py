@@ -224,6 +224,25 @@ def mark_resolved(conn: sqlite3.Connection, market_id: str, outcome: float,
     )
 
 
+def paper_settled_unresolved(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Predictions still flagged unresolved even though the paper trader already
+    recorded a SETTLE for them. This happens when Polymarket closes a market
+    BEFORE its scheduled resolution_date: the paper trader (which re-prices every
+    open position each cycle) catches the early close, but score.py only re-checks
+    predictions whose scheduled date has passed, so the prediction row lags.
+
+    The SETTLE trade's `price` is the resolved outcome (outcomePrices[0] of the
+    closed market), so this reconciliation costs nothing — no network call."""
+    return conn.execute(
+        """
+        SELECT p.market_id AS market_id, t.price AS outcome
+        FROM predictions p
+        JOIN trades t ON t.market_id = p.market_id AND t.action = 'SETTLE'
+        WHERE p.resolved = 0 AND t.price IS NOT NULL
+        """
+    ).fetchall()
+
+
 def all_predictions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute("SELECT * FROM predictions ORDER BY decision_timestamp").fetchall()
 
