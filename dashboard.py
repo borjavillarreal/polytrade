@@ -11,6 +11,7 @@ what's already stored.
 """
 
 import html
+import json
 import os
 import webbrowser
 from datetime import datetime, timezone
@@ -26,11 +27,17 @@ def _stat_card(label: str, value: str, sub: str = "") -> str:
             f'<div class="value">{html.escape(value)}</div>{sub_html}</div>')
 
 
-def _equity_svg(values: list, starting: float) -> str:
-    """Inline SVG line chart of total portfolio value over time."""
-    if len(values) < 2:
+def _equity_svg(rows: list, starting: float) -> str:
+    """Inline SVG line chart of total portfolio value over time.
+
+    Hovering the chart snaps a crosshair to the nearest recorded point and shows
+    that point's dollar value and timestamp. This is pure client-side rendering
+    of data already in the DB — it makes no network calls and costs nothing."""
+    if len(rows) < 2:
         return ('<div class="empty">The equity timeline fills in once the simulator '
                 'has run for a few cycles.</div>')
+    values = [float(r["total_value"]) for r in rows]
+    dates = [(r["timestamp"] or "")[:16].replace("T", " ") for r in rows]
     W, H = 900, 220
     pl, pr, pt, pb = 56, 14, 14, 26
     pw, ph = W - pl - pr, H - pt - pb
@@ -52,9 +59,18 @@ def _equity_svg(values: list, starting: float) -> str:
     last = values[-1]
     color = "#4ade80" if last >= starting else "#f87171"
     by = fy(starting)
+
+    # Points fed to the hover handler: [viewBox_x, viewBox_y, value, "date"].
+    points_js = "[" + ",".join(
+        f'[{fx(i):.1f},{fy(v):.1f},{v:.2f},"{dates[i]}"]'
+        for i, v in enumerate(values)
+    ) + "]"
+    points_js = points_js.replace("</", "<\\/")  # guard against </script> breakout
+
     return (
-        f'<svg viewBox="0 0 {W} {H}" style="width:100%;height:auto;background:#11161d;'
-        f'border:1px solid #232a34;border-radius:10px">'
+        f'<div class="chartwrap">'
+        f'<svg id="eqsvg" viewBox="0 0 {W} {H}" style="width:100%;height:auto;'
+        f'background:#11161d;border:1px solid #232a34;border-radius:10px">'
         f'<line x1="{pl}" y1="{by:.1f}" x2="{W - pr}" y2="{by:.1f}" stroke="#3a4452" '
         f'stroke-dasharray="4 4"/>'
         f'<text x="{pl - 6}" y="{by + 3:.1f}" fill="#8a94a3" font-size="11" '
@@ -67,8 +83,61 @@ def _equity_svg(values: list, starting: float) -> str:
         f'<circle cx="{fx(n - 1):.1f}" cy="{fy(last):.1f}" r="3.5" fill="{color}"/>'
         f'<text x="{W - pr}" y="{fy(last) - 7:.1f}" fill="{color}" font-size="12" '
         f'text-anchor="end">${last:,.0f}</text>'
+        # hover crosshair + snap dot (hidden until the mouse is over the chart)
+        f'<line id="eqguide" y1="{pt}" y2="{pt + ph}" stroke="#5b6675" '
+        f'stroke-width="1" visibility="hidden"/>'
+        f'<circle id="eqdot" r="4" fill="{color}" stroke="#0f1216" '
+        f'stroke-width="1.5" visibility="hidden"/>'
+        # transparent hit area on top so mouse events fire anywhere on the chart
+        f'<rect id="eqhit" x="{pl}" y="{pt}" width="{pw}" height="{ph}" '
+        f'fill="transparent" style="cursor:crosshair"/>'
         f'</svg>'
+        f'<div id="eqtip" class="chart-tip"></div>'
+        f'<script>(function(){{'
+        f'var pts={points_js},W={W};'
+        f'var svg=document.getElementById("eqsvg"),hit=document.getElementById("eqhit"),'
+        f'guide=document.getElementById("eqguide"),dot=document.getElementById("eqdot"),'
+        f'tip=document.getElementById("eqtip");'
+        f'function fmt(v){{return "$"+Number(v).toLocaleString(undefined,'
+        f'{{minimumFractionDigits:2,maximumFractionDigits:2}});}}'
+        f'function move(e){{'
+        f'var r=svg.getBoundingClientRect(),s=r.width/W;'
+        f'var mx=(e.clientX-r.left)/s,best=0,bd=1e9;'
+        f'for(var i=0;i<pts.length;i++){{var d=Math.abs(pts[i][0]-mx);'
+        f'if(d<bd){{bd=d;best=i;}}}}'
+        f'var p=pts[best];'
+        f'guide.setAttribute("x1",p[0]);guide.setAttribute("x2",p[0]);'
+        f'guide.setAttribute("visibility","visible");'
+        f'dot.setAttribute("cx",p[0]);dot.setAttribute("cy",p[1]);'
+        f'dot.setAttribute("visibility","visible");'
+        f'tip.style.display="block";'
+        f'tip.innerHTML="<b>"+fmt(p[2])+"</b><span>"+p[3]+" UTC</span>";'
+        f'tip.style.left=(p[0]*s)+"px";tip.style.top=(p[1]*s)+"px";'
+        f'}}'
+        f'function leave(){{guide.setAttribute("visibility","hidden");'
+        f'dot.setAttribute("visibility","hidden");tip.style.display="none";}}'
+        f'hit.addEventListener("mousemove",move);'
+        f'hit.addEventListener("mouseleave",leave);'
+        f'}})();</script>'
+        f'</div>'
     )
+
+
+def _interpret_side(question: str, side: str) -> str:
+    """Plain-language meaning of a LONG/SHORT bet, in terms of the actual question.
+
+    LONG = the model bought 'Yes' (expects the market to resolve YES).
+    SHORT = the model bought 'No' (expects the market to resolve NO)."""
+    q = (question or "").strip().rstrip("?").strip()
+    if side == "LONG":
+        return (f'<b>LONG = betting YES.</b> The model thinks the market underprices this, '
+                f'so it expects the answer to be <b>yes</b>: it <b>does</b> expect that '
+                f'&ldquo;{html.escape(q)}&rdquo;.')
+    if side == "SHORT":
+        return (f'<b>SHORT = betting NO.</b> The model thinks the market overprices this, '
+                f'so it expects the answer to be <b>no</b>: it does <b>not</b> expect that '
+                f'&ldquo;{html.escape(q)}&rdquo;.')
+    return html.escape(side or "")
 
 
 def _portfolio_section(conn) -> str:
@@ -100,27 +169,87 @@ def _portfolio_section(conn) -> str:
         _stat_card("Realized P&L", f"${realized:,.2f}"),
         _stat_card("Open positions", str(len(positions))),
     ]
-    svg = _equity_svg([float(p["total_value"]) for p in eq], starting)
+    svg = _equity_svg(eq, starting)
+
+    # Reasoning is already frozen in the predictions table (written by analyze.py).
+    # Joining to it here just displays what's on disk — no model call, no extra cost.
+    preds_by_id = {
+        r["market_id"]: r
+        for r in conn.execute("SELECT * FROM predictions").fetchall()
+    }
 
     if positions:
         prows = []
+        detail_map = {}
         for p in positions:
+            mid = p["market_id"]
             cb = float(p["cost_basis"] or 0)
             lv = float(p["last_value"] if p["last_value"] is not None else cb)
             upct = (lv - cb) / cb if cb else 0.0
             pcls = "good" if lv >= cb else "bad"
             prows.append(
-                f'<tr><td class="q">{html.escape((p["question"] or "")[:68])}</td>'
+                f'<tr class="clickable" onclick="showPos(\'{html.escape(mid)}\')" '
+                f'title="Click for the reasoning behind this trade">'
+                f'<td class="q">{html.escape((p["question"] or "")[:68])}'
+                f'<span class="why-chip">why?</span></td>'
                 f'<td>{html.escape(p["side"] or "")}</td>'
                 f'<td>{float(p["entry_price"] or 0):.2f}</td>'
                 f'<td>{float(p["last_price"] or 0):.2f}</td>'
                 f'<td>${lv:,.0f}</td>'
                 f'<td class="{pcls}">{upct:+.0%}</td></tr>'
             )
-        pos_block = ('<h3>Open positions</h3><table><thead><tr><th>market</th>'
+            pred = preds_by_id.get(mid)
+            reasoning = (pred["model_reasoning"] if pred else "") or (
+                "No stored reasoning for this position.")
+            conf = (pred["model_confidence"] if pred else "") or "-"
+            model_p = float(pred["model_prob"]) if pred else float(p["model_prob"] or 0)
+            market_p = float(pred["market_prob"]) if pred else None
+            edge = float(pred["edge"]) if pred else None
+            detail_map[mid] = {
+                "question": p["question"] or "",
+                "side": p["side"] or "",
+                "interp": _interpret_side(p["question"] or "", p["side"] or ""),
+                "model": model_p,
+                "market": market_p,
+                "edge": edge,
+                "conf": conf,
+                "reasoning": reasoning,
+            }
+        pos_block = ('<h3>Open positions <span class="hint">(click a row for the '
+                     'reasoning &mdash; free, already stored)</span></h3>'
+                     '<table><thead><tr><th>market</th>'
                      '<th>side</th><th>entry</th><th>now</th><th>value</th>'
                      '<th>P&amp;L</th></tr></thead><tbody>'
                      + "".join(prows) + '</tbody></table>')
+        data_json = json.dumps(detail_map).replace("</", "<\\/")
+        pos_block += (
+            '<div id="posmodal" class="modal-backdrop" onclick="hidePos(event)">'
+            '<div class="modal" onclick="event.stopPropagation()">'
+            '<button class="modal-x" onclick="hidePos(event)" '
+            'aria-label="Close">&times;</button>'
+            '<div id="pm-body"></div></div></div>'
+            f'<script>var POS={data_json};'
+            'function showPos(id){var d=POS[id];if(!d)return;'
+            'var pct=function(x){return (x==null)?"&ndash;":(x*100).toFixed(0)+"%";};'
+            'var edge=(d.edge==null)?"&ndash;":((d.edge>=0?"+":"")+(d.edge*100).toFixed(0)+" pts");'
+            'var esc=function(s){var e=document.createElement("div");e.textContent=s;'
+            'return e.innerHTML;};'
+            'var h="<h3 class=\\"pm-q\\">"+esc(d.question)+"</h3>";'
+            'h+="<div class=\\"pm-interp\\">"+d.interp+"</div>";'
+            'h+="<div class=\\"pm-nums\\">"+'
+            '"<span>model P(yes) <b>"+pct(d.model)+"</b></span>"+'
+            '"<span>market P(yes) <b>"+pct(d.market)+"</b></span>"+'
+            '"<span>edge <b>"+edge+"</b></span>"+'
+            '"<span>confidence <b>"+esc(d.conf)+"</b></span>"+"</div>";'
+            'h+="<div class=\\"pm-label\\">Model reasoning at decision time</div>";'
+            'h+="<div class=\\"pm-reason\\">"+esc(d.reasoning)+"</div>";'
+            'document.getElementById("pm-body").innerHTML=h;'
+            'document.getElementById("posmodal").style.display="flex";}'
+            'function hidePos(e){if(e)e.stopPropagation();'
+            'document.getElementById("posmodal").style.display="none";}'
+            'document.addEventListener("keydown",function(e){'
+            'if(e.key==="Escape")hidePos();});</script>'
+        )
     else:
         pos_block = '<h3>Open positions</h3><div class="empty">None open right now.</div>'
 
@@ -301,6 +430,41 @@ def _build_html(conn) -> str:
            padding: 18px; color: #9aa4b2; font-size: 14px; }}
   code {{ background: #232a34; padding: 1px 6px; border-radius: 5px; }}
   .foot {{ margin-top: 34px; color: #6b7480; font-size: 12px; }}
+  /* interactive equity chart tooltip */
+  .chartwrap {{ position: relative; }}
+  .chart-tip {{ position: absolute; display: none; transform: translate(-50%, -125%);
+               pointer-events: none; background: #0b0e12; border: 1px solid #333c48;
+               border-radius: 8px; padding: 6px 9px; font-size: 12px; white-space: nowrap;
+               box-shadow: 0 4px 14px rgba(0,0,0,.45); z-index: 5; }}
+  .chart-tip b {{ display: block; font-size: 14px; color: #e7ecf2; }}
+  .chart-tip span {{ color: #8a94a3; font-size: 11px; }}
+  /* clickable open-position rows */
+  tr.clickable {{ cursor: pointer; }}
+  tr.clickable:hover td {{ background: #202632; }}
+  .why-chip {{ margin-left: 8px; font-size: 10px; color: #8a94a3;
+              border: 1px solid #37404d; border-radius: 999px; padding: 1px 7px;
+              text-transform: uppercase; letter-spacing: .04em; vertical-align: middle; }}
+  tr.clickable:hover .why-chip {{ color: #cdd5df; border-color: #4a5563; }}
+  /* position-reasoning modal */
+  .modal-backdrop {{ display: none; position: fixed; inset: 0; z-index: 50;
+                    background: rgba(5,7,10,.66); align-items: center;
+                    justify-content: center; padding: 20px; }}
+  .modal {{ position: relative; background: #161b22; border: 1px solid #2a323d;
+           border-radius: 14px; max-width: 640px; width: 100%; max-height: 82vh;
+           overflow-y: auto; padding: 22px 24px 24px; box-shadow: 0 18px 50px rgba(0,0,0,.6); }}
+  .modal-x {{ position: absolute; top: 10px; right: 12px; background: none; border: none;
+             color: #8a94a3; font-size: 24px; line-height: 1; cursor: pointer; }}
+  .modal-x:hover {{ color: #e7ecf2; }}
+  .pm-q {{ font-size: 16px; color: #e7ecf2; margin: 2px 40px 12px 0; }}
+  .pm-interp {{ background: #1c2531; border: 1px solid #2a3644; border-radius: 10px;
+               padding: 11px 13px; font-size: 13.5px; line-height: 1.5; color: #d7dee8; }}
+  .pm-nums {{ display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 14px 0 4px;
+             font-size: 12.5px; color: #8a94a3; }}
+  .pm-nums b {{ color: #e7ecf2; }}
+  .pm-label {{ margin-top: 16px; color: #8a94a3; font-size: 11px; text-transform: uppercase;
+              letter-spacing: .04em; }}
+  .pm-reason {{ margin-top: 6px; font-size: 13.5px; line-height: 1.6; color: #c7d0db;
+               white-space: pre-wrap; }}
 </style></head><body><div class="wrap">
   <h1>Polytrade dashboard</h1>
   <div class="meta">model {html.escape(config.ANTHROPIC_MODEL)} &middot; updated {updated}
