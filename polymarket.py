@@ -72,6 +72,20 @@ def _to_float(raw: Any, default: float = 0.0) -> float:
         return default
 
 
+def _event_or_market_slug(m: dict) -> Optional[str]:
+    """The slug used in a public Polymarket URL (https://polymarket.com/event/<slug>).
+
+    Prefer the parent event's slug (canonical for the /event/ page); fall back to
+    the market's own slug. Returns None if neither is present."""
+    events = m.get("events")
+    if isinstance(events, list) and events and isinstance(events[0], dict):
+        ev_slug = events[0].get("slug")
+        if ev_slug:
+            return str(ev_slug)
+    slug = m.get("slug")
+    return str(slug) if slug else None
+
+
 def normalize_market(m: dict) -> Optional[dict]:
     """Project a raw Gamma market into the fields the harness cares about.
 
@@ -106,6 +120,7 @@ def normalize_market(m: dict) -> Optional[dict]:
         "liquidity": _to_float(m.get("liquidityNum", m.get("liquidity"))),
         "resolution_date": m.get("endDate"),
         "yes_token_id": str(token_ids[0]) if token_ids else None,
+        "slug": _event_or_market_slug(m),  # for building the public Polymarket URL
         "active": bool(m.get("active")),
         "closed": bool(m.get("closed")),
         "enable_order_book": bool(m.get("enableOrderBook")),
@@ -176,7 +191,9 @@ def price_and_status(market_id: str) -> Optional[dict]:
     if not (0.0 <= yes <= 1.0):
         return None
     closed = bool(raw.get("closed"))
-    return {"yes_price": yes, "closed": closed, "outcome": (yes if closed else None)}
+    return {"yes_price": yes, "closed": closed,
+            "outcome": (yes if closed else None),
+            "slug": _event_or_market_slug(raw)}
 
 
 def resolution_for(market_id: str) -> Optional[float]:

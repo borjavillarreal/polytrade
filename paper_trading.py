@@ -63,6 +63,10 @@ def run(conn) -> dict:
         if not snap:
             continue  # couldn't price this cycle; leave the position untouched
 
+        # Backfill the Polymarket URL slug (free: we already fetched this market).
+        if snap.get("slug"):
+            record.set_market_slug(conn, pos["market_id"], snap["slug"])
+
         side = pos["side"]
         shares = float(pos["shares"])
         cost_basis = float(pos["cost_basis"])

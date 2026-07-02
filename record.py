@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS markets (
     liquidity        REAL,
     yes_token_id     TEXT,
     resolution_date  TEXT,               -- ISO8601 endDate
+    slug             TEXT,               -- Polymarket URL slug (polymarket.com/event/<slug>)
     fetch_timestamp  TEXT NOT NULL       -- ISO8601 UTC when this snapshot was taken
 );
 
@@ -115,6 +116,8 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> None:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(markets)").fetchall()}
         if "description" not in cols:
             conn.execute("ALTER TABLE markets ADD COLUMN description TEXT")
+        if "slug" not in cols:
+            conn.execute("ALTER TABLE markets ADD COLUMN slug TEXT")
         conn.commit()
     finally:
         if own:
@@ -131,16 +134,17 @@ def upsert_market(conn: sqlite3.Connection, m: dict, fetch_timestamp: str) -> No
         """
         INSERT INTO markets (market_id, condition_id, question, description,
                              target_outcome, yes_price, volume, liquidity,
-                             yes_token_id, resolution_date, fetch_timestamp)
+                             yes_token_id, resolution_date, slug, fetch_timestamp)
         VALUES (:market_id, :condition_id, :question, :description,
                 :target_outcome, :yes_price, :volume, :liquidity,
-                :yes_token_id, :resolution_date, :fetch_timestamp)
+                :yes_token_id, :resolution_date, :slug, :fetch_timestamp)
         ON CONFLICT(market_id) DO UPDATE SET
             description=excluded.description,
             yes_price=excluded.yes_price,
             volume=excluded.volume,
             liquidity=excluded.liquidity,
             resolution_date=excluded.resolution_date,
+            slug=COALESCE(excluded.slug, markets.slug),
             fetch_timestamp=excluded.fetch_timestamp
         """,
         {
@@ -154,9 +158,19 @@ def upsert_market(conn: sqlite3.Connection, m: dict, fetch_timestamp: str) -> No
             "liquidity": m.get("liquidity"),
             "yes_token_id": m.get("yes_token_id"),
             "resolution_date": m.get("resolution_date"),
+            "slug": m.get("slug"),
             "fetch_timestamp": fetch_timestamp,
         },
     )
+
+
+def set_market_slug(conn: sqlite3.Connection, market_id: str, slug: str) -> None:
+    """Backfill the Polymarket URL slug for a market we already know about.
+    Used to fill slugs for open positions whose market is no longer in the
+    fetch window but is still re-priced every cycle. No-op for empty slugs."""
+    if not slug:
+        return
+    conn.execute("UPDATE markets SET slug = ? WHERE market_id = ?", (slug, market_id))
 
 
 def markets_without_predictions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
