@@ -150,8 +150,26 @@ def _money_signed(x: float) -> str:
     return f'{"+" if x >= 0 else "-"}${abs(x):,.2f}'
 
 
+def _activity_table(activity: list) -> str:
+    """A small table of every recorded movement for one market (chronological)."""
+    if not activity:
+        return '<div class="pm-note">No recorded movements for this market yet.</div>'
+    rows = "".join(
+        f'<tr><td>{html.escape(a["when"])}</td><td>{html.escape(a["action"])}</td>'
+        f'<td>{html.escape(a["side"])}</td><td>{a["price"]:.2f}</td>'
+        f'<td class="{"" if a["pnl"] is None else ("good" if a["pnl"] >= 0 else "bad")}">'
+        f'{"" if a["pnl"] is None else _money_signed(float(a["pnl"]))}</td>'
+        f'<td>{html.escape(a["reason"])}</td></tr>'
+        for a in activity
+    )
+    return ('<table class="pm-table"><thead><tr><th>when (UTC)</th><th>action</th>'
+            '<th>side</th><th>price</th><th>P&amp;L</th><th>why</th></tr></thead>'
+            f'<tbody>{rows}</tbody></table>')
+
+
 def _position_modal_html(question, side, model_p, market_p, edge, conf, reasoning,
-                         url, value, pnl_d, pnl_pct, entry_p, now_p) -> str:
+                         url, value, pnl_d, pnl_pct, entry_p, now_p,
+                         opened, activity) -> str:
     """Pre-render the click-through detail for one open position (no JS assembly).
 
     Everything shown here is already on disk — the reasoning was frozen by
@@ -160,11 +178,13 @@ def _position_modal_html(question, side, model_p, market_p, edge, conf, reasonin
         return "&ndash;" if x is None else f"{x * 100:.0f}%"
     edge_txt = "&ndash;" if edge is None else f'{edge * 100:+.0f} pts'
     pcls = "good" if pnl_d >= 0 else "bad"
+    opened_txt = html.escape((opened or "")[:16].replace("T", " ")) or "&ndash;"
     return (
         f'<h3 class="pm-q">{html.escape(question)}</h3>'
         f'<div class="pm-interp">{_interpret_side(question, side)}</div>'
         f'<div class="pm-nums">'
         f'<span>side <b>{html.escape(side)}</b></span>'
+        f'<span>opened <b>{opened_txt} UTC</b></span>'
         f'<span>value <b>${value:,.2f}</b></span>'
         f'<span>P&amp;L <b class="{pcls}">{_money_signed(pnl_d)} ({pnl_pct:+.0%})</b></span>'
         f'<span>entry <b>{entry_p:.2f}</b></span>'
@@ -176,18 +196,19 @@ def _position_modal_html(question, side, model_p, market_p, edge, conf, reasonin
         f'<span>confidence <b>{html.escape(conf)}</b></span></div>'
         f'<a class="pm-link" href="{html.escape(url)}" target="_blank" '
         f'rel="noopener noreferrer">View this market on Polymarket &#8599;</a>'
+        f'<div class="pm-label">Activity <span class="hint">(all movements for this '
+        f'market)</span></div>{_activity_table(activity)}'
         f'<div class="pm-label">Model reasoning at decision time</div>'
         f'<div class="pm-reason">{html.escape(reasoning)}</div>'
     )
 
 
-def _polymarket_url(question: str) -> str:
-    """Best-effort Polymarket event URL from the question text.
-
-    Polymarket event slugs are the lowercased title with apostrophes dropped and
-    every other run of non-alphanumerics collapsed to a single hyphen. E.g.
-    'Strait of Hormuz traffic returns to normal by July 15?' ->
-    strait-of-hormuz-traffic-returns-to-normal-by-july-15."""
+def _polymarket_url(question: str, slug: str = None) -> str:
+    """Polymarket event URL. Uses the real slug stored from the API when we have
+    it; otherwise falls back to a best-effort slug derived from the question text
+    (imprecise — Polymarket's real slug often differs, so this can 404)."""
+    if slug:
+        return f"https://polymarket.com/event/{slug}"
     s = (question or "").lower().replace("’", "'").replace("'", "")
     s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
     return f"https://polymarket.com/event/{s}"
@@ -512,11 +533,24 @@ def _portfolio_section(conn) -> str:
         r["market_id"]: r
         for r in conn.execute("SELECT * FROM predictions").fetchall()
     }
-    # descriptions help the (free, heuristic) industry/country classifier
-    desc_by_id = {
-        r["market_id"]: (r["description"] or "")
-        for r in conn.execute("SELECT market_id, description FROM markets").fetchall()
-    }
+    # descriptions help the (free, heuristic) industry/country classifier;
+    # slugs (when the cloud cycle has fetched them) give correct Polymarket links.
+    desc_by_id, slug_by_id = {}, {}
+    for r in conn.execute("SELECT market_id, description, slug FROM markets").fetchall():
+        desc_by_id[r["market_id"]] = r["description"] or ""
+        slug_by_id[r["market_id"]] = r["slug"] or ""
+
+    # every recorded movement, grouped by market, oldest first — the position's
+    # full activity history (bought/sold/settled dates, prices, P&L).
+    activity_by_market = {}
+    for t in conn.execute("SELECT * FROM trades ORDER BY id ASC").fetchall():
+        activity_by_market.setdefault(t["market_id"], []).append({
+            "when": (t["timestamp"] or "")[:16].replace("T", " "),
+            "action": t["action"] or "", "side": t["side"] or "",
+            "price": float(t["price"] or 0), "pnl": t["realized_pnl"],
+            "reason": t["reason"] or "",
+        })
+
     cls_by_id = {}  # market_id -> (industry, country), memoized for reuse in movements
 
     def _class_for(mid, q):
@@ -547,6 +581,8 @@ def _portfolio_section(conn) -> str:
             entry_p = float(p["entry_price"] or 0)
             now_p = float(p["last_price"] or 0)
             q = p["question"] or ""
+            opened = p["entry_timestamp"] or ""
+            opened_day = opened[:10]
             pred = preds_by_id.get(mid)
             conf = (pred["model_confidence"] if pred else "") or "-"
             industry, country = _class_for(mid, q)
@@ -567,6 +603,7 @@ def _portfolio_section(conn) -> str:
                 f'<span class="why-chip">why?</span></td>'
                 f'<td>{html.escape(side)}</td>'
                 f'<td>{html.escape(conf)}</td>'
+                f'<td>{html.escape(opened_day)}</td>'
                 f'<td>{entry_p:.2f}</td>'
                 f'<td>{now_p:.2f}</td>'
                 f'<td>${lv:,.0f}</td>'
@@ -590,7 +627,8 @@ def _portfolio_section(conn) -> str:
             edge = float(pred["edge"]) if pred else None
             modals[f"pos:{mid}"] = _position_modal_html(
                 q, side, model_p, market_p, edge, conf, reasoning,
-                _polymarket_url(q), lv, pnl_d, upct, entry_p, now_p)
+                _polymarket_url(q, slug_by_id.get(mid)), lv, pnl_d, upct,
+                entry_p, now_p, opened, activity_by_market.get(mid, []))
 
         industries = sorted({r[0] for r in cls_by_id.values()})
         countries = sorted({r[1] for r in cls_by_id.values()})
@@ -610,8 +648,8 @@ def _portfolio_section(conn) -> str:
                      'reasoning &amp; a link to Polymarket &mdash; free, already '
                      'stored)</span></h3>' + filt
                      + '<table><thead><tr><th>market</th>'
-                     '<th>side</th><th>conf</th><th>entry</th><th>now</th><th>value</th>'
-                     '<th>P&amp;L $</th><th>P&amp;L %</th></tr></thead>'
+                     '<th>side</th><th>conf</th><th>opened</th><th>entry</th><th>now</th>'
+                     '<th>value</th><th>P&amp;L $</th><th>P&amp;L %</th></tr></thead>'
                      '<tbody id="pos-tbody">'
                      + "".join(prows) + '</tbody></table>')
 
@@ -675,7 +713,7 @@ def _portfolio_section(conn) -> str:
                 f'<td>{html.escape(t["reason"] or "")}</td></tr>'
             )
             modals[f"trd:{tid}"] = _trade_modal_html(
-                t, pred, industry, country, _polymarket_url(q))
+                t, pred, industry, country, _polymarket_url(q, slug_by_id.get(mid)))
 
         actions = [a for a in ("BUY", "SELL", "SETTLE")
                    if any((t["action"] or "") == a for t in trades)]
