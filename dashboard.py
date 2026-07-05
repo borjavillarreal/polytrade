@@ -443,6 +443,90 @@ def _filter_select(sid: str, label: str, options: list) -> str:
 _FILTER_FN = {"fp": "filterPos", "fm": "filterMov"}
 
 
+def _open_count_svg(series: list) -> str:
+    """Static step chart of how many positions were open over time, reconstructed
+    from the movement log (+1 per BUY, -1 per SELL/SETTLE). Uses native SVG
+    <title> tooltips so it still works inside a modal (injected HTML doesn't run
+    <script>). Pure client-side rendering of on-disk data — no cost."""
+    if len(series) < 2:
+        return ('<div class="pm-note">Not enough movement history yet to chart how the '
+                'open-position count changes over time.</div>')
+    xs, ys, labels = [], [], []
+    for ts, c in series:
+        try:
+            xs.append(datetime.fromisoformat((ts or "").replace("Z", "+00:00")).timestamp())
+        except (ValueError, TypeError):
+            xs.append(None)
+        ys.append(c)
+        labels.append((ts or "")[:16].replace("T", " "))
+    if any(x is None for x in xs):      # fall back to even spacing if a parse failed
+        xs = list(range(len(series)))
+    W, H = 560, 170
+    pl, pr, pt, pb = 40, 12, 16, 28
+    pw, ph = W - pl - pr, H - pt - pb
+    xmin, xmax = min(xs), max(xs)
+    xspan = (xmax - xmin) or 1
+    ymax = max(ys)
+    ymin = min(0, min(ys))
+    yspan = (ymax - ymin) or 1
+
+    def fx(x):
+        return pl + pw * ((x - xmin) / xspan)
+
+    def fy(y):
+        return pt + ph * (1 - (y - ymin) / yspan)
+
+    step = []
+    for i in range(len(xs)):
+        if i > 0:
+            step.append((fx(xs[i]), fy(ys[i - 1])))
+        step.append((fx(xs[i]), fy(ys[i])))
+    line = " ".join(f"{x:.1f},{y:.1f}" for x, y in step)
+    area = (f"{fx(xs[0]):.1f},{fy(ymin):.1f} " + line
+            + f" {fx(xs[-1]):.1f},{fy(ymin):.1f}")
+    dots = "".join(
+        f'<circle cx="{fx(xs[i]):.1f}" cy="{fy(ys[i]):.1f}" r="3" class="ocount-dot">'
+        f'<title>{html.escape(labels[i])} UTC &mdash; {ys[i]} open</title></circle>'
+        for i in range(len(xs))
+    )
+    return (
+        f'<svg class="linechart" viewBox="0 0 {W} {H}" style="width:100%;height:auto">'
+        f'<text class="ax" x="{pl - 6}" y="{fy(ymax) + 4:.1f}" font-size="11" '
+        f'text-anchor="end">{ymax}</text>'
+        f'<text class="ax" x="{pl - 6}" y="{fy(0) + 4:.1f}" font-size="11" '
+        f'text-anchor="end">0</text>'
+        f'<line class="grid" x1="{pl}" y1="{fy(0):.1f}" x2="{W - pr}" y2="{fy(0):.1f}"/>'
+        f'<polygon points="{area}" class="ocount-fill"/>'
+        f'<polyline points="{line}" class="ocount-line" fill="none" stroke-width="2"/>'
+        f'{dots}'
+        f'<text class="ax" x="{pl}" y="{H - 9}" font-size="10" text-anchor="start">'
+        f'{html.escape(labels[0][:10])}</text>'
+        f'<text class="ax" x="{W - pr}" y="{H - 9}" font-size="10" text-anchor="end">'
+        f'{html.escape(labels[-1][:10])}</text>'
+        f'</svg>'
+    )
+
+
+_REASON_LABELS = {"take_profit": "take-profit", "stop_loss": "stop-loss",
+                  "edge_closed": "edge exit", "resolved": "resolution",
+                  "entry": "entry"}
+
+
+def _reason_label(r: str) -> str:
+    return _REASON_LABELS.get(r, r or "—")
+
+
+def _mover_rows(items: list) -> str:
+    """Compact P&L rows (question, signed $, tag) for the summary winners/losers."""
+    if not items:
+        return '<div class="pm-note">None.</div>'
+    return ('<table class="pm-table"><tbody>' + "".join(
+        f'<tr><td class="q">{html.escape(m["q"][:58])}</td>'
+        f'<td class="{"good" if m["pnl"] >= 0 else "bad"}">{_money_signed(m["pnl"])}</td>'
+        f'<td class="hint">{html.escape(m["tag"])}</td></tr>' for m in items)
+        + '</tbody></table>')
+
+
 def _annualized(ret: float, created_at: str, now: datetime):
     """Linear (simple, non-compounding) annualization, per the user's mental model:
     +2% over one month reads as +24%/yr. Returns (annual_ret, days_elapsed)."""
@@ -481,6 +565,19 @@ def _portfolio_section(conn) -> str:
     unrealized = sum(
         float(p["last_value"] if p["last_value"] is not None else p["cost_basis"] or 0)
         - float(p["cost_basis"] or 0) for p in positions)
+
+    # open-position count over time, reconstructed from the movement log
+    # (+1 per BUY, -1 per SELL/SETTLE), collapsed to one point per timestamp.
+    _count, _counts_at = 0, {}
+    for tr in conn.execute("SELECT timestamp, action FROM trades ORDER BY id ASC"):
+        a = tr["action"]
+        if a == "BUY":
+            _count += 1
+        elif a in ("SELL", "SETTLE"):
+            _count -= 1
+        _counts_at[tr["timestamp"]] = _count
+    open_count_series = list(_counts_at.items())
+    open_count_chart = _open_count_svg(open_count_series)
 
     # modal payloads (key -> pre-rendered HTML string), injected on click
     modals = {}
@@ -655,6 +752,7 @@ def _portfolio_section(conn) -> str:
 
         modals["open"] = (
             f'<h3 class="pm-q">Open positions ({len(positions)})</h3>'
+            f'<div class="pm-label">Open positions over time</div>{open_count_chart}'
             f'<div class="pm-note">Every open position with its live mark, industry and '
             f'country. Click a row in the main table for the model\'s full reasoning and '
             f'a Polymarket link.</div><table class="pm-table"><thead><tr><th>market</th>'
@@ -678,7 +776,9 @@ def _portfolio_section(conn) -> str:
         pie_block = ''
         dist_block = ''
         modals["open"] = ('<h3 class="pm-q">Open positions (0)</h3>'
-                          '<div class="pm-note">None open right now.</div>')
+                          '<div class="pm-label">Open positions over time</div>'
+                          + open_count_chart
+                          + '<div class="pm-note">None open right now.</div>')
 
     if trades:
         trows = []
@@ -767,6 +867,86 @@ def _portfolio_section(conn) -> str:
             f'<h3 class="pm-q">Realized P&amp;L &mdash; {_money_signed(realized)}</h3>'
             f'<div class="pm-note">No positions have closed yet.</div>')
 
+    # ---- Portfolio summary modal (what drove the profit/loss) ----
+    net = realized + unrealized
+    net_cls = "good" if net >= 0 else "bad"
+    r_cls = "good" if realized >= 0 else "bad"
+    u_cls = "good" if unrealized >= 0 else "bad"
+
+    by_reason = {}
+    for t in closes:
+        slot = by_reason.setdefault(_reason_label(t["reason"]), [0, 0.0])
+        slot[0] += 1
+        slot[1] += float(t["realized_pnl"])
+
+    movers = [{"q": t["question"] or "", "pnl": float(t["realized_pnl"]),
+               "tag": "closed · " + _reason_label(t["reason"])} for t in closes]
+    for p in positions:
+        cb = float(p["cost_basis"] or 0)
+        lv = float(p["last_value"] if p["last_value"] is not None else cb)
+        movers.append({"q": p["question"] or "", "pnl": lv - cb, "tag": "open · unrealized"})
+    winners = sorted([m for m in movers if m["pnl"] > 0], key=lambda m: m["pnl"],
+                     reverse=True)[:5]
+    losers = sorted([m for m in movers if m["pnl"] < 0], key=lambda m: m["pnl"])[:5]
+
+    # deterministic plain-language narrative (no model call)
+    bits = [f'On paper you are <b class="{net_cls}">{"up" if net >= 0 else "down"} '
+            f'{_money_signed(net)}</b> ({ret:+.1%} on the ${starting:,.0f} bankroll); '
+            f'equity is ${total:,.2f}.']
+    if closes:
+        pos_r = sorted([(r, v) for r, v in by_reason.items() if v[1] > 0],
+                       key=lambda x: x[1][1], reverse=True)
+        neg_r = sorted([(r, v) for r, v in by_reason.items() if v[1] < 0],
+                       key=lambda x: x[1][1])
+        drivers = []
+        if pos_r:
+            drivers.append(f'{_money_signed(pos_r[0][1][1])} from {pos_r[0][0]}')
+        if neg_r:
+            drivers.append(f'{_money_signed(neg_r[0][1][1])} from {neg_r[0][0]}')
+        s = (f'Realized <b class="{r_cls}">{_money_signed(realized)}</b> from '
+             f'{len(closes)} closed position(s)')
+        if drivers:
+            s += ' — mainly ' + ' and '.join(drivers)
+        bits.append(s + '.')
+    if positions:
+        bits.append(f'Open positions carry <b class="{u_cls}">{_money_signed(unrealized)}'
+                    f'</b> unrealized across {len(positions)} bet(s).')
+    if losers:
+        w = losers[0]
+        bits.append(f'Biggest drag: &ldquo;{html.escape(w["q"][:56])}&rdquo; '
+                    f'({_money_signed(w["pnl"])}, {html.escape(w["tag"])}).')
+    if winners:
+        b = winners[0]
+        bits.append(f'Biggest win: &ldquo;{html.escape(b["q"][:56])}&rdquo; '
+                    f'({_money_signed(b["pnl"])}, {html.escape(b["tag"])}).')
+    narrative = ' '.join(bits)
+
+    if by_reason:
+        reason_tbl = ('<table class="pm-table"><thead><tr><th>exit reason</th>'
+                      '<th>closes</th><th>P&amp;L</th></tr></thead><tbody>' + "".join(
+                          f'<tr><td>{html.escape(r)}</td><td>{v[0]}</td>'
+                          f'<td class="{"good" if v[1] >= 0 else "bad"}">'
+                          f'{_money_signed(v[1])}</td></tr>'
+                          for r, v in sorted(by_reason.items(), key=lambda x: x[1][1]))
+                      + '</tbody></table>')
+    else:
+        reason_tbl = '<div class="pm-note">No positions have closed yet.</div>'
+
+    modals["summary"] = (
+        '<h3 class="pm-q">Portfolio summary</h3>'
+        f'<div class="pm-nums">'
+        f'<span>net P&amp;L <b class="{net_cls}">{_money_signed(net)}</b></span>'
+        f'<span>realized <b class="{r_cls}">{_money_signed(realized)}</b></span>'
+        f'<span>unrealized <b class="{u_cls}">{_money_signed(unrealized)}</b></span>'
+        f'<span>equity <b>${total:,.2f}</b></span>'
+        f'<span>return <b class="{cls}">{ret:+.1%}</b></span></div>'
+        f'<div class="pm-interp">{narrative}</div>'
+        '<div class="pm-label">Realized P&amp;L by exit reason <span class="hint">'
+        '(what closed, and why it made or lost money)</span></div>' + reason_tbl
+        + '<div class="pm-label">Biggest winners</div>' + _mover_rows(winners)
+        + '<div class="pm-label">Biggest losers <span class="hint">(what went wrong)'
+        '</span></div>' + _mover_rows(losers))
+
     # ---- one modal for every clickable card / position row ----
     modals_json = json.dumps(modals).replace("</", "<\\/")
     modal_block = (
@@ -818,7 +998,9 @@ def _portfolio_section(conn) -> str:
     )
 
     return (f'<h2>Paper portfolio <span class="hint">(fictional ${starting:,.0f} — '
-            f'no real money)</span></h2>'
+            f'no real money)</span> '
+            f'<button class="summary-btn" onclick="showModal(\'summary\')">'
+            f'&#10022; Summary</button></h2>'
             f'<div class="cards">{"".join(cards)}</div>'
             f'<h3>Equity over time</h3>{svg}{pos_block}{pie_block}{dist_block}'
             f'{ledger_block}{modal_block}')
@@ -1052,6 +1234,14 @@ def _build_html(conn) -> str:
                white-space: pre-wrap; }}
   .pm-note {{ color: var(--muted); font-size: 12.5px; line-height: 1.5; margin: 6px 0 4px; }}
   .pm-table {{ margin-top: 10px; }}
+  .summary-btn {{ font-size: 12px; font-weight: 600; vertical-align: middle;
+                 background: var(--panel); color: var(--accent);
+                 border: 1px solid var(--accent); border-radius: 999px;
+                 padding: 3px 12px; cursor: pointer; font-family: inherit; margin-left: 4px; }}
+  .summary-btn:hover {{ background: var(--accent); color: #fff; }}
+  .ocount-line {{ stroke: var(--accent); }}
+  .ocount-fill {{ fill: var(--accent); opacity: .13; }}
+  .ocount-dot {{ fill: var(--accent); }}
   /* table filter controls */
   .filters {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
              margin: 4px 0 10px; }}
