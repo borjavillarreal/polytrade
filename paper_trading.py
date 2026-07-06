@@ -18,6 +18,8 @@ Position model (uniform in the Yes price):
           settles to shares * (1 - outcome).
 """
 
+import json
+import os
 from datetime import datetime, timezone
 
 import config
@@ -27,6 +29,35 @@ import record
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _load_manual_picks() -> list:
+    """market_ids a human chose to force into the book (from MANUAL_PICKS_PATH).
+    Accepts a JSON list of id strings, or of {"market_id": ...} objects."""
+    path = getattr(config, "MANUAL_PICKS_PATH", "manual_picks.json")
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (ValueError, OSError):
+        return []
+    picks = []
+    for item in data if isinstance(data, list) else []:
+        if isinstance(item, str):
+            picks.append(item)
+        elif isinstance(item, dict) and item.get("market_id"):
+            picks.append(str(item["market_id"]))
+    return picks
+
+
+def _target_stake(equity: float, edge_abs: float) -> float:
+    """Base stake scaled by how far the edge beats the entry bar: a bet at exactly
+    TRADE_ENTRY_EDGE gets POSITION_SIZE_FRACTION of equity; a 2x-threshold edge
+    gets ~2x that — so stronger bets are bigger. Clamped to [MIN, MAX]."""
+    ratio = edge_abs / config.TRADE_ENTRY_EDGE if config.TRADE_ENTRY_EDGE else 1.0
+    raw = config.POSITION_SIZE_FRACTION * equity * ratio
+    return max(config.MIN_TRADE_STAKE_USD, min(raw, config.MAX_POSITION_USD))
 
 
 def _side_price(side: str, yes_price: float) -> float:
@@ -120,38 +151,33 @@ def run(conn) -> dict:
         else:
             record.mark_position(conn, pos["market_id"], side_price, current_value, now)
 
-    # ---- 3: open new positions on live edges ----
+    # ---- 3: open new positions ----
     open_count = len(record.open_positions(conn))
     positions_value = sum(float(p["last_value"] or 0) for p in record.open_positions(conn))
     equity = cash + positions_value
+    fee_mult = 1.0 + config.TRADE_FEE_PCT
 
-    candidates = []
+    # candidate pool: open predictions we neither hold nor have traded, priced live
+    pool = []
     for row in record.candidate_entries(conn):
         price = float(row["current_price"])
-        if not (0.0 < price < 1.0):
-            continue
-        live_edge = float(row["model_prob"]) - price
-        if abs(live_edge) >= config.TRADE_ENTRY_EDGE:
-            candidates.append((abs(live_edge), live_edge, row, price))
-    candidates.sort(key=lambda c: c[0], reverse=True)
+        if 0.0 < price < 1.0:
+            pool.append((row, price))
+    pool_by_id = {row["market_id"]: (row, price) for row, price in pool}
 
-    for _, live_edge, row, price in candidates:
-        if open_count >= config.MAX_OPEN_POSITIONS:
-            break
+    def _enter(row, price, live_edge, stake, reason):
+        """Open one position for `stake` USD (fee on top). Mutates cash/open_count."""
+        nonlocal cash, open_count
         side = "LONG" if live_edge > 0 else "SHORT"
         side_price = price if side == "LONG" else (1.0 - price)
         if side_price < config.MIN_ENTRY_PRICE or side_price > config.MAX_ENTRY_PRICE:
-            continue
-
-        stake = min(config.POSITION_SIZE_FRACTION * equity, config.MAX_POSITION_USD)
-        affordable = cash / (1.0 + config.TRADE_FEE_PCT)
-        stake = min(stake, affordable)
-        if stake < 1.0:
-            continue  # out of meaningful cash
-
-        shares = stake / side_price
+            return False
         fee = stake * config.TRADE_FEE_PCT
+        if stake < config.MIN_TRADE_STAKE_USD or (stake + fee) > cash:
+            return False
+        shares = stake / side_price
         cash -= (stake + fee)
+        open_count += 1
         record.insert_position(conn, {
             "market_id": row["market_id"], "question": row["question"], "side": side,
             "shares": shares, "entry_price": side_price, "cost_basis": stake,
@@ -162,11 +188,43 @@ def run(conn) -> dict:
             "timestamp": now, "market_id": row["market_id"], "question": row["question"],
             "action": "BUY", "side": side, "shares": shares, "price": side_price,
             "cash_delta": -(stake + fee), "fee": fee, "realized_pnl": None,
-            "reason": "entry",
+            "reason": reason,
         })
-        open_count += 1
         summary["buys"].append({"question": row["question"], "side": side,
-                                "stake": stake, "edge": live_edge})
+                                "stake": stake, "edge": live_edge, "reason": reason})
+        return True
+
+    # 3a: auto-entries — every candidate that clears the edge bar, best first.
+    # Sized bigger for stronger edges, but each entry reserves MIN_TRADE_STAKE_USD
+    # for every still-to-fund candidate so a strong bet can't starve the rest —
+    # all the good bets fit rather than the first few draining the cash.
+    qualifying = sorted(
+        ((abs(float(row["model_prob"]) - price), float(row["model_prob"]) - price, row, price)
+         for row, price in pool if abs(float(row["model_prob"]) - price) >= config.TRADE_ENTRY_EDGE),
+        key=lambda c: c[0], reverse=True,
+    )
+    free = max(0, config.MAX_OPEN_POSITIONS - open_count)
+    qualifying = qualifying[:free]
+    for idx, (edge_abs, live_edge, row, price) in enumerate(qualifying):
+        remaining_after = len(qualifying) - idx - 1
+        reserve = remaining_after * config.MIN_TRADE_STAKE_USD
+        affordable = (cash / fee_mult) - reserve
+        stake = min(_target_stake(equity, edge_abs), affordable)
+        if stake < config.MIN_TRADE_STAKE_USD:
+            continue
+        _enter(row, price, live_edge, stake, "entry")
+
+    # 3b: manual picks — human-chosen close calls forced in, ignoring the edge bar.
+    for pid in _load_manual_picks():
+        if open_count >= config.MAX_OPEN_POSITIONS:
+            break
+        if pid not in pool_by_id:
+            continue  # already held/traded/resolved, or unpriced
+        row, price = pool_by_id[pid]
+        live_edge = float(row["model_prob"]) - price
+        edge_for_size = max(abs(live_edge), config.CLOSE_CALL_EDGE_FLOOR)
+        stake = min(_target_stake(equity, edge_for_size), cash / fee_mult)
+        _enter(row, price, live_edge, stake, "manual_pick")
 
     # ---- 4: snapshot equity to the timeline ----
     positions_value = sum(float(p["last_value"] or 0) for p in record.open_positions(conn))

@@ -947,6 +947,55 @@ def _portfolio_section(conn) -> str:
         + '<div class="pm-label">Biggest losers <span class="hint">(what went wrong)'
         '</span></div>' + _mover_rows(losers))
 
+    # ---- Close-calls modal (near-misses for human, qualitative review) ----
+    close_calls = []
+    for r in record.close_call_candidates(conn):
+        price = float(r["current_price"] or 0)
+        if not (0.0 < price < 1.0):
+            continue
+        live_edge = float(r["model_prob"]) - price
+        if config.CLOSE_CALL_EDGE_FLOOR <= abs(live_edge) < config.TRADE_ENTRY_EDGE:
+            close_calls.append((abs(live_edge), live_edge, price, r))
+    close_calls.sort(key=lambda c: c[0], reverse=True)
+    cc_count = len(close_calls)
+
+    cc_cards = []
+    for edge_abs, live_edge, price, r in close_calls:
+        side = "LONG" if live_edge > 0 else "SHORT"
+        mid = r["market_id"]
+        reasoning = (r["model_reasoning"] or "No stored reasoning.")
+        conf = r["model_confidence"] or "-"
+        cc_cards.append(
+            f'<div class="cc-card"><div class="cc-q">{html.escape(r["question"])}</div>'
+            f'<div class="pm-interp">{_interpret_side(r["question"], side)}</div>'
+            f'<div class="pm-nums"><span>would bet <b>{side}</b></span>'
+            f'<span>live edge <b>{abs(live_edge) * 100:.0f} pts</b> '
+            f'<span class="hint">(bar is {config.TRADE_ENTRY_EDGE * 100:.0f})</span></span>'
+            f'<span>model P(yes) <b>{float(r["model_prob"]) * 100:.0f}%</b></span>'
+            f'<span>price <b>{price:.2f}</b></span>'
+            f'<span>confidence <b>{html.escape(conf)}</b></span></div>'
+            f'<a class="pm-link" href="{html.escape(_polymarket_url(r["question"], r["slug"] or ""))}" '
+            f'target="_blank" rel="noopener noreferrer">View on Polymarket &#8599;</a>'
+            f'<div class="cc-idrow"><code>{html.escape(mid)}</code>'
+            f'<button class="copy-btn" onclick="copyId(\'{html.escape(mid)}\',this)">'
+            f'Copy ID</button></div>'
+            f'<div class="pm-label">Why the model leans this way '
+            f'<span class="hint">(the qualitative call)</span></div>'
+            f'<div class="pm-reason">{html.escape(reasoning)}</div></div>'
+        )
+    cc_body = ("".join(cc_cards) if cc_cards else
+               '<div class="pm-note">No close calls right now — every open '
+               'prediction is either already acted on or not within '
+               f'{config.CLOSE_CALL_EDGE_FLOOR:.2f}&ndash;{config.TRADE_ENTRY_EDGE:.2f} '
+               'of the price.</div>')
+    modals["closecalls"] = (
+        f'<h3 class="pm-q">Close calls ({cc_count})</h3>'
+        f'<div class="pm-note">Predictions with a real edge that landed just under '
+        f'the auto-bet bar ({config.CLOSE_CALL_EDGE_FLOOR:.2f}&ndash;'
+        f'{config.TRADE_ENTRY_EDGE:.2f}). Read the reasoning and decide for yourself. '
+        f'To bet one, <b>Copy ID</b> and send it to Claude to add to the manual '
+        f'picks — the next cycle will enter it.</div>' + cc_body)
+
     # ---- one modal for every clickable card / position row ----
     modals_json = json.dumps(modals).replace("</", "<\\/")
     modal_block = (
@@ -962,6 +1011,15 @@ def _portfolio_section(conn) -> str:
         'document.getElementById("pm-modal").style.display="none";}'
         'document.addEventListener("keydown",function(e){'
         'if(e.key==="Escape")hideModal();});'
+        # ---- copy a market id to the clipboard (close-calls) ----
+        'function copyId(id,btn){var done=function(){if(btn){var o=btn.textContent;'
+        'btn.textContent="Copied!";setTimeout(function(){btn.textContent=o;},1200);}};'
+        'var fb=function(){var t=document.createElement("textarea");t.value=id;'
+        't.style.position="fixed";t.style.opacity="0";document.body.appendChild(t);'
+        't.focus();t.select();try{document.execCommand("copy");}catch(e){}'
+        'document.body.removeChild(t);done();};'
+        'if(navigator.clipboard&&navigator.clipboard.writeText){'
+        'navigator.clipboard.writeText(id).then(done,fb);}else{fb();}}'
         # ---- client-side table filters (open positions + movements) ----
         'function _v(id){var e=document.getElementById(id);return e?e.value:"";}'
         'function _n(id){var e=document.getElementById(id);'
@@ -1000,7 +1058,9 @@ def _portfolio_section(conn) -> str:
     return (f'<h2>Paper portfolio <span class="hint">(fictional ${starting:,.0f} — '
             f'no real money)</span> '
             f'<button class="summary-btn" onclick="showModal(\'summary\')">'
-            f'&#10022; Summary</button></h2>'
+            f'&#10022; Summary</button> '
+            f'<button class="summary-btn" onclick="showModal(\'closecalls\')">'
+            f'&#9678; Close calls ({cc_count})</button></h2>'
             f'<div class="cards">{"".join(cards)}</div>'
             f'<h3>Equity over time</h3>{svg}{pos_block}{pie_block}{dist_block}'
             f'{ledger_block}{modal_block}')
@@ -1242,6 +1302,17 @@ def _build_html(conn) -> str:
   .ocount-line {{ stroke: var(--accent); }}
   .ocount-fill {{ fill: var(--accent); opacity: .13; }}
   .ocount-dot {{ fill: var(--accent); }}
+  /* close-calls cards */
+  .cc-card {{ background: var(--panel2); border: 1px solid var(--border);
+             border-radius: 12px; padding: 13px 15px; margin: 12px 0; }}
+  .cc-q {{ font-size: 14.5px; font-weight: 600; color: var(--text); margin-bottom: 8px; }}
+  .cc-idrow {{ display: flex; align-items: center; gap: 10px; margin-top: 10px; }}
+  .cc-idrow code {{ background: var(--code); padding: 2px 8px; border-radius: 6px;
+                   font-size: 12.5px; }}
+  .copy-btn {{ background: var(--panel); color: var(--accent); border: 1px solid var(--accent);
+              border-radius: 8px; padding: 3px 11px; font-size: 12px; cursor: pointer;
+              font-family: inherit; }}
+  .copy-btn:hover {{ background: var(--accent); color: #fff; }}
   /* table filter controls */
   .filters {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
              margin: 4px 0 10px; }}
