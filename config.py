@@ -91,15 +91,31 @@ STARTING_CAPITAL = 1000.0          # fictional starting bankroll (USD)
 # this. Direction is LONG (buy "Yes") if the model thinks Yes is underpriced,
 # SHORT (buy "No") if overpriced.
 TRADE_ENTRY_EDGE = 0.10
-# Risk sizing: stake this fraction of current total equity per new position...
-POSITION_SIZE_FRACTION = 0.10
+# Risk sizing: BASE stake as a fraction of current equity, for an entry sitting
+# right at TRADE_ENTRY_EDGE. Stronger edges scale up from here (edge/threshold),
+# so better bets get bigger stakes — capped by MAX_POSITION_USD. Kept modest so
+# many good bets can be funded at once rather than a few hogging the cash.
+POSITION_SIZE_FRACTION = 0.04
 # ...capped at this many dollars, and never more than available cash.
-MAX_POSITION_USD = 150.0
+MAX_POSITION_USD = 120.0
+# Never stake less than this on a bet (avoids meaningless dust positions). The
+# sizer reserves this much per still-to-fund candidate so that all qualifying
+# bets fit rather than the first few draining the cash.
+MIN_TRADE_STAKE_USD = 5.0
 # Skip a side priced outside this band (avoid illiquid longshots / no-upside).
 MIN_ENTRY_PRICE = 0.05
 MAX_ENTRY_PRICE = 0.95
-# At most this many open positions at once (diversification + cash control).
-MAX_OPEN_POSITIONS = 12
+# Cap on simultaneous open positions. High enough that the cap rarely drops a
+# genuinely good bet — cash + per-bet sizing is the real limiter, not this.
+MAX_OPEN_POSITIONS = 100
+
+# "Close calls": predictions whose live edge lands in [CLOSE_CALL_EDGE_FLOOR,
+# TRADE_ENTRY_EDGE) — real signal, just under the auto-entry bar. Surfaced on the
+# dashboard for a human to review qualitatively; never auto-traded.
+CLOSE_CALL_EDGE_FLOOR = 0.05
+# Human-chosen market_ids to force into the book regardless of the edge bar
+# (JSON list of id strings). Populated when you pick a close call to bet.
+MANUAL_PICKS_PATH = "manual_picks.json"
 
 # Exits (whichever triggers first):
 TAKE_PROFIT_PCT = 0.40             # close when a position is up >= 40%

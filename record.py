@@ -373,6 +373,25 @@ def realized_pnl_total(conn: sqlite3.Connection) -> float:
     return float(row[0])
 
 
+def close_call_candidates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Open predictions we neither hold nor have traded, joined to the current
+    market price and slug — the pool the dashboard filters into 'close calls'
+    (live edge just under the auto-entry bar). Read-only; carries the model's
+    reasoning so a human can judge each qualitatively."""
+    return conn.execute(
+        """
+        SELECT p.market_id, p.question, p.model_prob, p.market_prob, p.edge,
+               p.model_confidence, p.model_reasoning, p.resolution_date,
+               m.yes_price AS current_price, m.slug AS slug
+        FROM predictions p
+        JOIN markets m ON m.market_id = p.market_id
+        WHERE p.resolved = 0
+          AND p.market_id NOT IN (SELECT market_id FROM positions)
+          AND p.market_id NOT IN (SELECT DISTINCT market_id FROM trades)
+        """
+    ).fetchall()
+
+
 def candidate_entries(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Open predictions we don't already hold, joined to a current market price."""
     return conn.execute(
