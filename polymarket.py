@@ -131,18 +131,24 @@ def iter_active_markets(limit: int = config.GAMMA_PAGE_LIMIT):
     """Yield raw active, unclosed markets ordered by descending volume."""
     for page in range(config.GAMMA_MAX_PAGES):
         offset = page * limit
-        batch = _get(
-            f"{config.GAMMA_BASE}/markets",
-            params={
-                "closed": "false",
-                "active": "true",
-                "archived": "false",
-                "limit": limit,
-                "offset": offset,
-                "order": "volume",
-                "ascending": "false",
-            },
-        )
+        try:
+            batch = _get(
+                f"{config.GAMMA_BASE}/markets",
+                params={
+                    "closed": "false",
+                    "active": "true",
+                    "archived": "false",
+                    "limit": limit,
+                    "offset": offset,
+                    "order": "volume",
+                    "ascending": "false",
+                },
+            )
+        except RuntimeError:
+            # Gamma rejects deep pagination past a max offset (HTTP 422). Stop and
+            # keep the markets already collected from earlier pages rather than
+            # letting the whole fetch abort (which would roll back this run).
+            return
         if not isinstance(batch, list) or not batch:
             return
         for m in batch:

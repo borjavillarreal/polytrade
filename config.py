@@ -38,21 +38,23 @@ PRICE_WEB_SEARCH_PER_1K = 10.00
 # Market selection (fetch_markets.py)
 # --------------------------------------------------------------------------
 # Only consider markets with at least this much total USD volume (liquidity proxy).
-MIN_VOLUME_USD = 20_000.0
+# Lowered to widen the candidate pool so there are more bets to make.
+MIN_VOLUME_USD = 10_000.0
 
 # Resolution-date window: markets must resolve between N and M days from the
-# fetch timestamp. Short enough to score within the experiment, long enough that
-# the outcome is genuinely uncertain.
-MIN_DAYS_TO_RESOLUTION = 14
-MAX_DAYS_TO_RESOLUTION = 45
+# fetch timestamp. Widened (sooner + further out) so many more markets qualify;
+# the sooner end also raises turnover, which means more movement in the book.
+MIN_DAYS_TO_RESOLUTION = 5
+MAX_DAYS_TO_RESOLUTION = 75
 
 # Stop after collecting this many qualifying markets in one fetch run.
-MAX_MARKETS_PER_FETCH = 40
+MAX_MARKETS_PER_FETCH = 80
 
 # How many markets the Gamma API returns per page while we scan.
 GAMMA_PAGE_LIMIT = 100
-# Hard cap on pages scanned, so a bad filter can't paginate forever.
-GAMMA_MAX_PAGES = 40
+# Hard cap on pages scanned. Kept under Gamma's deep-pagination limit (it returns
+# HTTP 422 past a max offset ~2000); the fetch also stops gracefully if it hits it.
+GAMMA_MAX_PAGES = 20
 
 # --------------------------------------------------------------------------
 # Analysis run limits (analyze.py)
