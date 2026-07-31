@@ -89,15 +89,23 @@ CALIBRATION_BUCKETS = 10
 PAPER_TRADING_ENABLED = True
 STARTING_CAPITAL = 1000.0          # fictional starting bankroll (USD)
 
-# Entry: open a position when the LIVE edge (model_prob - current price) exceeds
-# this. Direction is LONG (buy "Yes") if the model thinks Yes is underpriced,
-# SHORT (buy "No") if overpriced.
+# Entry is gated on CONVICTION, not raw edge. Conviction blends the quantitative
+# edge with the model's own qualitative confidence:
+#     conviction = |live_edge| * CONFIDENCE_WEIGHT[model_confidence]
+# so a high-confidence call clears the bar at a smaller edge than a low-confidence
+# one, and the stake scales with the same number (surer bet -> bigger ticket).
+CONFIDENCE_WEIGHT = {"high": 1.3, "med": 1.0, "low": 0.5}
+# Open a position when conviction >= this. With the weights above: med enters at
+# edge 0.06, high at ~0.046, low only at 0.12. Direction is LONG (buy "Yes") if
+# the model thinks Yes is underpriced, SHORT (buy "No") if overpriced.
+ENTRY_CONVICTION = 0.06
+# Kept for scoring/alert displays that still speak in raw-edge terms.
 TRADE_ENTRY_EDGE = 0.10
-# Risk sizing: BASE stake as a fraction of current equity, for an entry sitting
-# right at TRADE_ENTRY_EDGE. Stronger edges scale up from here (edge/threshold),
-# so better bets get bigger stakes — capped by MAX_POSITION_USD. Kept modest so
-# many good bets can be funded at once rather than a few hogging the cash.
-POSITION_SIZE_FRACTION = 0.04
+# Risk sizing: BASE stake as a fraction of current equity for an entry sitting
+# right at ENTRY_CONVICTION. Stake scales linearly with conviction/ENTRY_CONVICTION,
+# so a 2x-conviction bet gets ~2x the ticket — capped by MAX_POSITION_USD. Kept
+# modest so many bets can be funded at once (diversification over concentration).
+POSITION_SIZE_FRACTION = 0.03
 # ...capped at this many dollars, and never more than available cash.
 MAX_POSITION_USD = 120.0
 # Never stake less than this on a bet (avoids meaningless dust positions). The
@@ -111,11 +119,19 @@ MAX_ENTRY_PRICE = 0.95
 # genuinely good bet — cash + per-bet sizing is the real limiter, not this.
 MAX_OPEN_POSITIONS = 100
 
-# "Close calls": predictions whose live edge lands in [CLOSE_CALL_EDGE_FLOOR,
-# TRADE_ENTRY_EDGE) — real signal, just under the auto-entry bar. Surfaced on the
+# Rotation: when cash can't fund a clearly better candidate, sell the weakest
+# open position (lowest remaining conviction) to free capital — but only if the
+# newcomer beats it by at least ROTATE_MIN_IMPROVEMENT, and at most
+# ROTATE_MAX_PER_CYCLE swaps per cycle so fees don't bleed the book.
+ROTATE_ENABLED = True
+ROTATE_MIN_IMPROVEMENT = 0.03
+ROTATE_MAX_PER_CYCLE = 2
+
+# "Close calls": candidates whose conviction lands in [CLOSE_CALL_CONVICTION_FLOOR,
+# ENTRY_CONVICTION) — real signal, just under the auto-entry bar. Surfaced on the
 # dashboard for a human to review qualitatively; never auto-traded.
-CLOSE_CALL_EDGE_FLOOR = 0.05
-# Human-chosen market_ids to force into the book regardless of the edge bar
+CLOSE_CALL_CONVICTION_FLOOR = 0.035
+# Human-chosen market_ids to force into the book regardless of the conviction bar
 # (JSON list of id strings). Populated when you pick a close call to bet.
 MANUAL_PICKS_PATH = "manual_picks.json"
 

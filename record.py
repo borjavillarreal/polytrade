@@ -393,11 +393,12 @@ def close_call_candidates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def candidate_entries(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """Open predictions we don't already hold, joined to a current market price."""
+    """Open predictions we don't already hold, joined to a current market price.
+    Carries model_confidence so the trader can gate/size on conviction."""
     return conn.execute(
         """
         SELECT p.market_id, p.question, p.model_prob, p.target_outcome,
-               m.yes_price AS current_price
+               p.model_confidence, m.yes_price AS current_price
         FROM predictions p
         JOIN markets m ON m.market_id = p.market_id
         WHERE p.resolved = 0
@@ -405,3 +406,16 @@ def candidate_entries(conn: sqlite3.Connection) -> list[sqlite3.Row]:
           AND p.market_id NOT IN (SELECT DISTINCT market_id FROM trades)
         """
     ).fetchall()
+
+
+def position_confidences(conn: sqlite3.Connection) -> dict:
+    """market_id -> model_confidence for currently open positions (for rotation)."""
+    return {
+        r["market_id"]: (r["model_confidence"] or "med")
+        for r in conn.execute(
+            """
+            SELECT pos.market_id, p.model_confidence
+            FROM positions pos LEFT JOIN predictions p ON p.market_id = pos.market_id
+            """
+        ).fetchall()
+    }
