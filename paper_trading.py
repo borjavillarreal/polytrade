@@ -51,11 +51,19 @@ def _load_manual_picks() -> list:
     return picks
 
 
-def _target_stake(equity: float, edge_abs: float) -> float:
-    """Base stake scaled by how far the edge beats the entry bar: a bet at exactly
-    TRADE_ENTRY_EDGE gets POSITION_SIZE_FRACTION of equity; a 2x-threshold edge
-    gets ~2x that — so stronger bets are bigger. Clamped to [MIN, MAX]."""
-    ratio = edge_abs / config.TRADE_ENTRY_EDGE if config.TRADE_ENTRY_EDGE else 1.0
+def _conviction(edge_abs: float, confidence: str) -> float:
+    """How sure we are of a bet: quantitative edge scaled by the model's own
+    qualitative confidence. This single number both gates entry (>= ENTRY_CONVICTION)
+    and sizes the ticket — surer bets get bigger stakes, shakier ones smaller."""
+    weight = config.CONFIDENCE_WEIGHT.get((confidence or "med").lower(), 1.0)
+    return edge_abs * weight
+
+
+def _target_stake(equity: float, conviction: float) -> float:
+    """Base stake scaled by how far conviction beats the entry bar: a bet at
+    exactly ENTRY_CONVICTION gets POSITION_SIZE_FRACTION of equity; 2x conviction
+    gets ~2x that. Clamped to [MIN, MAX]."""
+    ratio = conviction / config.ENTRY_CONVICTION if config.ENTRY_CONVICTION else 1.0
     raw = config.POSITION_SIZE_FRACTION * equity * ratio
     return max(config.MIN_TRADE_STAKE_USD, min(raw, config.MAX_POSITION_USD))
 
@@ -194,27 +202,80 @@ def run(conn) -> dict:
                                 "stake": stake, "edge": live_edge, "reason": reason})
         return True
 
-    # 3a: auto-entries — every candidate that clears the edge bar, best first.
-    # Sized bigger for stronger edges, but each entry reserves MIN_TRADE_STAKE_USD
-    # for every still-to-fund candidate so a strong bet can't starve the rest —
-    # all the good bets fit rather than the first few draining the cash.
-    qualifying = sorted(
-        ((abs(float(row["model_prob"]) - price), float(row["model_prob"]) - price, row, price)
-         for row, price in pool if abs(float(row["model_prob"]) - price) >= config.TRADE_ENTRY_EDGE),
-        key=lambda c: c[0], reverse=True,
-    )
+    # 3a: auto-entries — every candidate whose CONVICTION (edge x confidence)
+    # clears the bar, surest first. Pre-filters the tradeable price band so
+    # untouchable longshots don't clog the queue. Each entry reserves
+    # MIN_TRADE_STAKE_USD for every still-to-fund candidate so a strong bet
+    # can't starve the rest — all the good bets fit, just with scaled tickets.
+    def _in_band(live_edge: float, price: float) -> bool:
+        sp = price if live_edge > 0 else (1.0 - price)
+        return config.MIN_ENTRY_PRICE <= sp <= config.MAX_ENTRY_PRICE
+
+    qualifying = []
+    for row, price in pool:
+        live_edge = float(row["model_prob"]) - price
+        conv = _conviction(abs(live_edge), row["model_confidence"])
+        if conv >= config.ENTRY_CONVICTION and _in_band(live_edge, price):
+            qualifying.append((conv, live_edge, row, price))
+    qualifying.sort(key=lambda c: c[0], reverse=True)
+
     free = max(0, config.MAX_OPEN_POSITIONS - open_count)
     qualifying = qualifying[:free]
-    for idx, (edge_abs, live_edge, row, price) in enumerate(qualifying):
+    unfunded = []
+    for idx, (conv, live_edge, row, price) in enumerate(qualifying):
         remaining_after = len(qualifying) - idx - 1
         reserve = remaining_after * config.MIN_TRADE_STAKE_USD
         affordable = (cash / fee_mult) - reserve
-        stake = min(_target_stake(equity, edge_abs), affordable)
-        if stake < config.MIN_TRADE_STAKE_USD:
-            continue
-        _enter(row, price, live_edge, stake, "entry")
+        stake = min(_target_stake(equity, conv), affordable)
+        if stake < config.MIN_TRADE_STAKE_USD or not _enter(row, price, live_edge, stake, "entry"):
+            unfunded.append((conv, live_edge, row, price))
 
-    # 3b: manual picks — human-chosen close calls forced in, ignoring the edge bar.
+    # 3b: rotation — if cash couldn't fund a clearly better candidate, sell the
+    # weakest open position (lowest REMAINING conviction toward the model's fair
+    # value) to free capital. Only when the newcomer beats the weakest by
+    # ROTATE_MIN_IMPROVEMENT, and at most ROTATE_MAX_PER_CYCLE swaps per cycle.
+    if config.ROTATE_ENABLED and unfunded:
+        confs = record.position_confidences(conn)
+        rotations = 0
+        for conv, live_edge, row, price in unfunded:
+            if rotations >= config.ROTATE_MAX_PER_CYCLE:
+                break
+            held = []
+            for pos in record.open_positions(conn):
+                if pos["entry_timestamp"] == now:
+                    continue  # never rotate out something bought this same cycle
+                lp = float(pos["last_price"] or pos["entry_price"] or 0)
+                yes = lp if pos["side"] == "LONG" else (1.0 - lp)
+                rem_edge = (float(pos["model_prob"]) - yes if pos["side"] == "LONG"
+                            else yes - float(pos["model_prob"]))
+                held.append((_conviction(max(rem_edge, 0.0), confs.get(pos["market_id"])), pos))
+            if not held:
+                break
+            held.sort(key=lambda h: h[0])
+            weakest_conv, weakest = held[0]
+            if conv < weakest_conv + config.ROTATE_MIN_IMPROVEMENT:
+                break  # candidates are sorted; nothing further will qualify either
+            value = float(weakest["last_value"] or weakest["cost_basis"] or 0)
+            fee = value * config.TRADE_FEE_PCT
+            proceeds = value - fee
+            realized = proceeds - float(weakest["cost_basis"] or 0)
+            cash += proceeds
+            open_count -= 1
+            record.insert_trade(conn, {
+                "timestamp": now, "market_id": weakest["market_id"],
+                "question": weakest["question"], "action": "SELL",
+                "side": weakest["side"], "shares": float(weakest["shares"] or 0),
+                "price": float(weakest["last_price"] or 0), "cash_delta": proceeds,
+                "fee": fee, "realized_pnl": realized, "reason": "rotated",
+            })
+            record.close_position(conn, weakest["market_id"])
+            summary["sells"].append({"question": weakest["question"],
+                                     "pnl": realized, "reason": "rotated"})
+            stake = min(_target_stake(equity, conv), cash / fee_mult)
+            if _enter(row, price, live_edge, stake, "entry"):
+                rotations += 1
+
+    # 3c: manual picks — human-chosen close calls forced in, ignoring the bar.
     for pid in _load_manual_picks():
         if open_count >= config.MAX_OPEN_POSITIONS:
             break
@@ -222,8 +283,9 @@ def run(conn) -> dict:
             continue  # already held/traded/resolved, or unpriced
         row, price = pool_by_id[pid]
         live_edge = float(row["model_prob"]) - price
-        edge_for_size = max(abs(live_edge), config.CLOSE_CALL_EDGE_FLOOR)
-        stake = min(_target_stake(equity, edge_for_size), cash / fee_mult)
+        conv = max(_conviction(abs(live_edge), row["model_confidence"]),
+                   config.CLOSE_CALL_CONVICTION_FLOOR)
+        stake = min(_target_stake(equity, conv), cash / fee_mult)
         _enter(row, price, live_edge, stake, "manual_pick")
 
     # ---- 4: snapshot equity to the timeline ----

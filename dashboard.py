@@ -509,7 +509,8 @@ def _open_count_svg(series: list) -> str:
 
 _REASON_LABELS = {"take_profit": "take-profit", "stop_loss": "stop-loss",
                   "edge_closed": "edge exit", "resolved": "resolution",
-                  "entry": "entry"}
+                  "entry": "entry", "rotated": "rotated out",
+                  "manual_pick": "manual pick"}
 
 
 def _reason_label(r: str) -> str:
@@ -948,19 +949,26 @@ def _portfolio_section(conn) -> str:
         '</span></div>' + _mover_rows(losers))
 
     # ---- Close-calls modal (near-misses for human, qualitative review) ----
+    # Same conviction the trader uses (edge x confidence weight), and only
+    # tradeable prices — so everything listed here is genuinely actionable.
     close_calls = []
     for r in record.close_call_candidates(conn):
         price = float(r["current_price"] or 0)
         if not (0.0 < price < 1.0):
             continue
         live_edge = float(r["model_prob"]) - price
-        if config.CLOSE_CALL_EDGE_FLOOR <= abs(live_edge) < config.TRADE_ENTRY_EDGE:
-            close_calls.append((abs(live_edge), live_edge, price, r))
+        side_price = price if live_edge > 0 else (1.0 - price)
+        if not (config.MIN_ENTRY_PRICE <= side_price <= config.MAX_ENTRY_PRICE):
+            continue
+        weight = config.CONFIDENCE_WEIGHT.get((r["model_confidence"] or "med").lower(), 1.0)
+        conviction = abs(live_edge) * weight
+        if config.CLOSE_CALL_CONVICTION_FLOOR <= conviction < config.ENTRY_CONVICTION:
+            close_calls.append((conviction, live_edge, price, r))
     close_calls.sort(key=lambda c: c[0], reverse=True)
     cc_count = len(close_calls)
 
     cc_cards = []
-    for edge_abs, live_edge, price, r in close_calls:
+    for conviction, live_edge, price, r in close_calls:
         side = "LONG" if live_edge > 0 else "SHORT"
         mid = r["market_id"]
         reasoning = (r["model_reasoning"] or "No stored reasoning.")
@@ -969,8 +977,9 @@ def _portfolio_section(conn) -> str:
             f'<div class="cc-card"><div class="cc-q">{html.escape(r["question"])}</div>'
             f'<div class="pm-interp">{_interpret_side(r["question"], side)}</div>'
             f'<div class="pm-nums"><span>would bet <b>{side}</b></span>'
-            f'<span>live edge <b>{abs(live_edge) * 100:.0f} pts</b> '
-            f'<span class="hint">(bar is {config.TRADE_ENTRY_EDGE * 100:.0f})</span></span>'
+            f'<span>conviction <b>{conviction * 100:.1f}</b> '
+            f'<span class="hint">(bar is {config.ENTRY_CONVICTION * 100:.0f}; '
+            f'edge {abs(live_edge) * 100:.0f} pts &times; {html.escape(conf)})</span></span>'
             f'<span>model P(yes) <b>{float(r["model_prob"]) * 100:.0f}%</b></span>'
             f'<span>price <b>{price:.2f}</b></span>'
             f'<span>confidence <b>{html.escape(conf)}</b></span></div>'
@@ -984,17 +993,18 @@ def _portfolio_section(conn) -> str:
             f'<div class="pm-reason">{html.escape(reasoning)}</div></div>'
         )
     cc_body = ("".join(cc_cards) if cc_cards else
-               '<div class="pm-note">No close calls right now — every open '
-               'prediction is either already acted on or not within '
-               f'{config.CLOSE_CALL_EDGE_FLOOR:.2f}&ndash;{config.TRADE_ENTRY_EDGE:.2f} '
-               'of the price.</div>')
+               '<div class="pm-note">No close calls right now — every tradeable '
+               'prediction is either already acted on or its conviction is outside '
+               f'{config.CLOSE_CALL_CONVICTION_FLOOR:.3f}&ndash;'
+               f'{config.ENTRY_CONVICTION:.2f}.</div>')
     modals["closecalls"] = (
         f'<h3 class="pm-q">Close calls ({cc_count})</h3>'
-        f'<div class="pm-note">Predictions with a real edge that landed just under '
-        f'the auto-bet bar ({config.CLOSE_CALL_EDGE_FLOOR:.2f}&ndash;'
-        f'{config.TRADE_ENTRY_EDGE:.2f}). Read the reasoning and decide for yourself. '
-        f'To bet one, <b>Copy ID</b> and send it to Claude to add to the manual '
-        f'picks — the next cycle will enter it.</div>' + cc_body)
+        f'<div class="pm-note">Candidates whose conviction (edge &times; the model\'s '
+        f'own confidence) landed just under the auto-bet bar '
+        f'({config.CLOSE_CALL_CONVICTION_FLOOR:.3f}&ndash;{config.ENTRY_CONVICTION:.2f}). '
+        f'Read the reasoning and decide for yourself. To bet one, <b>Copy ID</b> and '
+        f'send it to Claude to add to the manual picks — the next cycle will enter '
+        f'it.</div>' + cc_body)
 
     # ---- one modal for every clickable card / position row ----
     modals_json = json.dumps(modals).replace("</", "<\\/")
