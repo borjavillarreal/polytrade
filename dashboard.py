@@ -29,16 +29,61 @@ def _stat_card(label: str, value: str, sub: str = "") -> str:
             f'<div class="value">{html.escape(value)}</div>{sub_html}</div>')
 
 
-def _equity_svg(rows: list, starting: float) -> str:
-    """Inline SVG line chart of total portfolio value over time.
+# Shared hover layer for every line/step chart: a crosshair that snaps to the
+# nearest data point, a highlight dot, and one tooltip. Emitted once per page.
+# All tooltip strings are pre-escaped server-side before being JSON-embedded.
+_HOVER_JS = (
+    '<script>function ptAttach(id,pts,fmt){'
+    'var svg=document.getElementById(id);if(!svg)return;'
+    'var hit=svg.querySelector(".hit"),guide=svg.querySelector(".crosshair"),'
+    'dot=svg.querySelector(".snapdot"),tip=document.getElementById(id+"-tip");'
+    'var W=svg.viewBox.baseVal.width;'
+    'function move(e){var r=svg.getBoundingClientRect(),s=r.width/W;'
+    'var mx=(e.clientX-r.left)/s,best=0,bd=1e9;'
+    'for(var i=0;i<pts.length;i++){var d=Math.abs(pts[i][0]-mx);if(d<bd){bd=d;best=i;}}'
+    'var p=pts[best];'
+    'guide.setAttribute("x1",p[0]);guide.setAttribute("x2",p[0]);'
+    'guide.setAttribute("visibility","visible");'
+    'dot.setAttribute("cx",p[0]);dot.setAttribute("cy",p[1]);'
+    'dot.setAttribute("visibility","visible");'
+    'tip.style.display="block";tip.innerHTML=fmt(p);'
+    'tip.style.left=(p[0]*s)+"px";tip.style.top=(p[1]*s)+"px";}'
+    'function leave(){guide.setAttribute("visibility","hidden");'
+    'dot.setAttribute("visibility","hidden");tip.style.display="none";}'
+    'hit.addEventListener("mousemove",move);hit.addEventListener("mouseleave",leave);}'
+    'function ptMoney(v){return (v<0?"-":"")+"$"+Math.abs(v).toLocaleString(undefined,'
+    '{minimumFractionDigits:2,maximumFractionDigits:2});}</script>'
+)
 
-    Hovering the chart snaps a crosshair to the nearest recorded point and shows
-    that point's dollar value and timestamp. This is pure client-side rendering
-    of data already in the DB — it makes no network calls and costs nothing."""
+
+def _chart_frame(chart_id: str, W: int, H: int, inner: str, pl: float, pt_: float,
+                 pw: float, ph: float, pts_js: str, fmt_js: str, dot_style: str) -> str:
+    """Wrap chart marks with the shared crosshair/tooltip hover layer."""
+    return (
+        f'<div class="chartwrap">'
+        f'<svg id="{chart_id}" class="linechart" viewBox="0 0 {W} {H}" '
+        f'style="width:100%;height:auto">{inner}'
+        f'<line class="crosshair" y1="{pt_}" y2="{pt_ + ph:.1f}" stroke-width="1" '
+        f'visibility="hidden"/>'
+        f'<circle class="snapdot" r="4" style="fill:{dot_style}" stroke-width="1.5" '
+        f'visibility="hidden"/>'
+        f'<rect class="hit" x="{pl}" y="{pt_}" width="{pw}" height="{ph}" '
+        f'fill="transparent" style="cursor:crosshair"/>'
+        f'</svg><div id="{chart_id}-tip" class="chart-tip"></div>'
+        f'<script>ptAttach("{chart_id}",{pts_js},{fmt_js});</script></div>'
+    )
+
+
+def _equity_svg(rows: list, starting: float) -> str:
+    """Total portfolio value over time. Hover snaps a crosshair to the nearest
+    point and shows total equity plus its cash / invested split at that moment.
+    Pure client-side rendering of on-disk data — no network calls, no cost."""
     if len(rows) < 2:
         return ('<div class="empty">The equity timeline fills in once the simulator '
                 'has run for a few cycles.</div>')
     values = [float(r["total_value"]) for r in rows]
+    cashes = [float(r["cash"] or 0) for r in rows]
+    invested = [float(r["positions_value"] or 0) for r in rows]
     dates = [(r["timestamp"] or "")[:16].replace("T", " ") for r in rows]
     W, H = 900, 220
     pl, pr, pt, pb = 56, 14, 14, 26
@@ -62,18 +107,18 @@ def _equity_svg(rows: list, starting: float) -> str:
     # Color is driven by a CSS variable so the light/dark toggle recolors it too.
     line_var = "var(--good)" if last >= starting else "var(--bad)"
     by = fy(starting)
+    area = (f"{fx(0):.1f},{pt + ph:.1f} " + poly + f" {fx(n - 1):.1f},{pt + ph:.1f}")
 
-    # Points fed to the hover handler: [viewBox_x, viewBox_y, value, "date"].
-    points_js = "[" + ",".join(
-        f'[{fx(i):.1f},{fy(v):.1f},{v:.2f},"{dates[i]}"]'
-        for i, v in enumerate(values)
-    ) + "]"
-    points_js = points_js.replace("</", "<\\/")  # guard against </script> breakout
+    pts_js = json.dumps(
+        [[round(fx(i), 1), round(fy(v), 1), round(v, 2), round(cashes[i], 2),
+          round(invested[i], 2), dates[i]] for i, v in enumerate(values)]
+    ).replace("</", "<\\/")
+    fmt_js = ('function(p){return "<b>"+ptMoney(p[2])+"</b><span>"+p[5]+" UTC</span>"'
+              '+"<span>cash "+ptMoney(p[3])+" &middot; invested "+ptMoney(p[4])'
+              '+"</span>";}')
 
-    return (
-        f'<div class="chartwrap">'
-        f'<svg id="eqsvg" class="linechart" viewBox="0 0 {W} {H}" '
-        f'style="width:100%;height:auto">'
+    inner = (
+        f'<polygon points="{area}" style="fill:{line_var}" class="area-fill"/>'
         f'<line class="grid" x1="{pl}" y1="{by:.1f}" x2="{W - pr}" y2="{by:.1f}" '
         f'stroke-dasharray="4 4"/>'
         f'<text class="ax" x="{pl - 6}" y="{by + 3:.1f}" font-size="11" '
@@ -88,43 +133,207 @@ def _equity_svg(rows: list, starting: float) -> str:
         f'style="fill:{line_var}"/>'
         f'<text x="{W - pr}" y="{fy(last) - 7:.1f}" style="fill:{line_var}" '
         f'font-size="12" text-anchor="end">${last:,.0f}</text>'
-        # hover crosshair + snap dot (hidden until the mouse is over the chart)
-        f'<line id="eqguide" class="crosshair" y1="{pt}" y2="{pt + ph}" '
-        f'stroke-width="1" visibility="hidden"/>'
-        f'<circle id="eqdot" r="4" style="fill:{line_var}" class="snapdot" '
-        f'stroke-width="1.5" visibility="hidden"/>'
-        # transparent hit area on top so mouse events fire anywhere on the chart
-        f'<rect id="eqhit" x="{pl}" y="{pt}" width="{pw}" height="{ph}" '
-        f'fill="transparent" style="cursor:crosshair"/>'
-        f'</svg>'
-        f'<div id="eqtip" class="chart-tip"></div>'
-        f'<script>(function(){{'
-        f'var pts={points_js},W={W};'
-        f'var svg=document.getElementById("eqsvg"),hit=document.getElementById("eqhit"),'
-        f'guide=document.getElementById("eqguide"),dot=document.getElementById("eqdot"),'
-        f'tip=document.getElementById("eqtip");'
-        f'function fmt(v){{return "$"+Number(v).toLocaleString(undefined,'
-        f'{{minimumFractionDigits:2,maximumFractionDigits:2}});}}'
-        f'function move(e){{'
-        f'var r=svg.getBoundingClientRect(),s=r.width/W;'
-        f'var mx=(e.clientX-r.left)/s,best=0,bd=1e9;'
-        f'for(var i=0;i<pts.length;i++){{var d=Math.abs(pts[i][0]-mx);'
-        f'if(d<bd){{bd=d;best=i;}}}}'
-        f'var p=pts[best];'
-        f'guide.setAttribute("x1",p[0]);guide.setAttribute("x2",p[0]);'
-        f'guide.setAttribute("visibility","visible");'
-        f'dot.setAttribute("cx",p[0]);dot.setAttribute("cy",p[1]);'
-        f'dot.setAttribute("visibility","visible");'
+    )
+    return _chart_frame("eqsvg", W, H, inner, pl, pt, pw, ph, pts_js, fmt_js, line_var)
+
+
+def _open_count_main_svg(series: list) -> str:
+    """Step chart of how many positions were open over time, with the shared
+    crosshair hover: point at any moment and read the exact count and date."""
+    if len(series) < 2:
+        return ('<div class="empty">Not enough movement history yet to chart the '
+                'open-position count.</div>')
+    xs, ys, labels = [], [], []
+    for ts, cnt in series:
+        try:
+            xs.append(datetime.fromisoformat((ts or "").replace("Z", "+00:00")).timestamp())
+        except (ValueError, TypeError):
+            xs.append(None)
+        ys.append(cnt)
+        labels.append((ts or "")[:16].replace("T", " "))
+    if any(x is None for x in xs):
+        xs = list(range(len(series)))
+    W, H = 560, 200
+    pl, pr, pt, pb = 34, 12, 14, 24
+    pw, ph = W - pl - pr, H - pt - pb
+    xmin, xmax = min(xs), max(xs)
+    xspan = (xmax - xmin) or 1
+    ymax = max(max(ys), 1)
+    ymin = 0
+
+    def fx(x):
+        return pl + pw * ((x - xmin) / xspan)
+
+    def fy(y):
+        return pt + ph * (1 - (y - ymin) / (ymax - ymin))
+
+    step = []
+    for i in range(len(xs)):
+        if i > 0:
+            step.append((fx(xs[i]), fy(ys[i - 1])))
+        step.append((fx(xs[i]), fy(ys[i])))
+    line = " ".join(f"{x:.1f},{y:.1f}" for x, y in step)
+    area = (f"{fx(xs[0]):.1f},{fy(0):.1f} " + line + f" {fx(xs[-1]):.1f},{fy(0):.1f}")
+
+    pts_js = json.dumps(
+        [[round(fx(xs[i]), 1), round(fy(ys[i]), 1), ys[i], labels[i]]
+         for i in range(len(xs))]
+    ).replace("</", "<\\/")
+    fmt_js = ('function(p){return "<b>"+p[2]+" open</b><span>"+p[3]+" UTC</span>";}')
+
+    inner = (
+        f'<polygon points="{area}" style="fill:var(--accent)" class="area-fill"/>'
+        f'<text class="ax" x="{pl - 6}" y="{fy(ymax) + 4:.1f}" font-size="11" '
+        f'text-anchor="end">{ymax}</text>'
+        f'<text class="ax" x="{pl - 6}" y="{fy(0) + 4:.1f}" font-size="11" '
+        f'text-anchor="end">0</text>'
+        f'<line class="grid" x1="{pl}" y1="{fy(0):.1f}" x2="{W - pr}" y2="{fy(0):.1f}"/>'
+        f'<polyline points="{line}" fill="none" style="stroke:var(--accent)" '
+        f'stroke-width="2"/>'
+        f'<circle cx="{fx(xs[-1]):.1f}" cy="{fy(ys[-1]):.1f}" r="3.5" '
+        f'style="fill:var(--accent)"/>'
+        f'<text x="{W - pr}" y="{fy(ys[-1]) - 7:.1f}" style="fill:var(--accent)" '
+        f'font-size="12" text-anchor="end">{ys[-1]}</text>'
+        f'<text class="ax" x="{pl}" y="{H - 7}" font-size="10" text-anchor="start">'
+        f'{html.escape(labels[0][:10])}</text>'
+        f'<text class="ax" x="{W - pr}" y="{H - 7}" font-size="10" text-anchor="end">'
+        f'{html.escape(labels[-1][:10])}</text>'
+    )
+    return _chart_frame("ocsvg", W, H, inner, pl, pt, pw, ph, pts_js, fmt_js,
+                        "var(--accent)")
+
+
+def _cum_pnl_svg(closes_asc: list) -> str:
+    """Cumulative realized P&L over time. Hover shows the running total plus the
+    trade that moved it (its P&L and market)."""
+    if len(closes_asc) < 2:
+        return ('<div class="empty">The realized P&amp;L curve appears after a couple '
+                'of positions close.</div>')
+    cum, pts = 0.0, []
+    for t in closes_asc:
+        cum += float(t["realized_pnl"])
+        pts.append((t["timestamp"], cum, float(t["realized_pnl"]), t["question"] or ""))
+    xs = []
+    for ts, _, _, _ in pts:
+        try:
+            xs.append(datetime.fromisoformat((ts or "").replace("Z", "+00:00")).timestamp())
+        except (ValueError, TypeError):
+            xs.append(None)
+    if any(x is None for x in xs):
+        xs = list(range(len(pts)))
+    W, H = 560, 200
+    pl, pr, pt_, pb = 46, 12, 14, 24
+    pw, ph = W - pl - pr, H - pt_ - pb
+    xmin, xmax = min(xs), max(xs)
+    xspan = (xmax - xmin) or 1
+    vals = [p[1] for p in pts]
+    vmin, vmax = min(min(vals), 0.0), max(max(vals), 0.0)
+    if vmax - vmin < 1e-9:
+        vmax += 1.0
+    span = vmax - vmin
+
+    def fx(x):
+        return pl + pw * ((x - xmin) / xspan)
+
+    def fy(v):
+        return pt_ + ph * (1 - (v - vmin) / span)
+
+    poly = " ".join(f"{fx(xs[i]):.1f},{fy(p[1]):.1f}" for i, p in enumerate(pts))
+    last = vals[-1]
+    line_var = "var(--good)" if last >= 0 else "var(--bad)"
+    zy = fy(0.0)
+
+    pts_js = json.dumps(
+        [[round(fx(xs[i]), 1), round(fy(p[1]), 1), round(p[1], 2), round(p[2], 2),
+          (p[0] or "")[:16].replace("T", " "), html.escape(p[3][:44])]
+         for i, p in enumerate(pts)]
+    ).replace("</", "<\\/")
+    fmt_js = ('function(p){return "<b>"+ptMoney(p[2])+" realized</b>'
+              '<span>"+p[4]+" UTC</span><span>"+(p[3]>=0?"+":"")+ptMoney(p[3])'
+              '+" &middot; "+p[5]+"</span>";}')
+
+    inner = (
+        f'<line class="grid" x1="{pl}" y1="{zy:.1f}" x2="{W - pr}" y2="{zy:.1f}" '
+        f'stroke-dasharray="4 4"/>'
+        f'<text class="ax" x="{pl - 6}" y="{zy + 4:.1f}" font-size="11" '
+        f'text-anchor="end">$0</text>'
+        f'<text class="ax" x="{pl - 6}" y="{pt_ + 8:.1f}" font-size="11" '
+        f'text-anchor="end">${vmax:,.0f}</text>'
+        f'<polyline points="{poly}" fill="none" style="stroke:{line_var}" '
+        f'stroke-width="2"/>'
+        f'<circle cx="{fx(xs[-1]):.1f}" cy="{fy(last):.1f}" r="3.5" '
+        f'style="fill:{line_var}"/>'
+        f'<text x="{W - pr}" y="{fy(last) - 7:.1f}" style="fill:{line_var}" '
+        f'font-size="12" text-anchor="end">{"+" if last >= 0 else "-"}'
+        f'${abs(last):,.0f}</text>'
+    )
+    return _chart_frame("cpsvg", W, H, inner, pl, pt_, pw, ph, pts_js, fmt_js, line_var)
+
+
+def _pnl_bars_svg(bars: list) -> str:
+    """Horizontal diverging bars: unrealized P&L of every open position, best to
+    worst. Hover a row for the exact $ and %; click it to open that position's
+    detail modal. `bars` is a list of {mid, q, pnl, pct}."""
+    if not bars:
+        return '<div class="empty">No open positions to chart right now.</div>'
+    bars = sorted(bars, key=lambda b: b["pnl"], reverse=True)
+    W = 560
+    row_h, top, bot = 24, 8, 8
+    H = top + bot + row_h * len(bars)
+    lo = min(0.0, min(b["pnl"] for b in bars))
+    hi = max(0.0, max(b["pnl"] for b in bars))
+    if hi - lo < 1e-9:
+        hi += 1.0
+    # reserve room for the value label at the outer end of the longest bar
+    pl_ = 52 if lo < 0 else 10
+    pr_ = 58 if hi > 0 else 12
+
+    def fx(v):
+        return pl_ + (W - pl_ - pr_) * ((v - lo) / (hi - lo))
+
+    x0 = fx(0.0)
+    rows_svg, rows_js = [], []
+    for i, b in enumerate(bars):
+        y = top + i * row_h
+        bx = min(x0, fx(b["pnl"]))
+        bw = max(abs(fx(b["pnl"]) - x0), 1.5)
+        cls = "good" if b["pnl"] >= 0 else "bad"
+        val = f'{"+" if b["pnl"] >= 0 else "-"}${abs(b["pnl"]):,.0f}'
+        vx = fx(b["pnl"]) + (6 if b["pnl"] >= 0 else -6)
+        anchor = "start" if b["pnl"] >= 0 else "end"
+        rows_svg.append(
+            f'<g class="pbar-g" data-i="{i}" onclick="showModal(\'pos:{html.escape(b["mid"])}\')">'
+            f'<rect class="pbar-hit" x="0" y="{y}" width="{W}" height="{row_h}" '
+            f'fill="transparent"/>'
+            f'<rect class="pbar-bar" x="{bx:.1f}" y="{y + 10}" width="{bw:.1f}" '
+            f'height="9" rx="3" style="fill:var(--{cls})"/>'
+            f'<text class="ax" x="{pl_}" y="{y + 8}" font-size="10">'
+            f'{html.escape(b["q"][:52])}</text>'
+            f'<text x="{vx:.1f}" y="{y + 18}" font-size="10" text-anchor="{anchor}" '
+            f'style="fill:var(--{cls})">{val}</text></g>'
+        )
+        rows_js.append([html.escape(b["q"][:60]), round(b["pnl"], 2),
+                        round(b["pct"] * 100, 1)])
+    data_js = json.dumps(rows_js).replace("</", "<\\/")
+    return (
+        f'<div class="chartwrap">'
+        f'<svg id="pbsvg" class="linechart" viewBox="0 0 {W} {H}" '
+        f'style="width:100%;height:auto">'
+        f'<line class="grid" x1="{x0:.1f}" y1="{top}" x2="{x0:.1f}" y2="{H - bot}"/>'
+        + "".join(rows_svg) +
+        f'</svg><div id="pbsvg-tip" class="chart-tip"></div>'
+        f'<script>(function(){{var D={data_js};'
+        f'var svg=document.getElementById("pbsvg"),tip=document.getElementById("pbsvg-tip");'
+        f'var W={W};'
+        f'svg.querySelectorAll(".pbar-g").forEach(function(g){{'
+        f'g.addEventListener("mousemove",function(e){{'
+        f'var d=D[+g.getAttribute("data-i")];var r=svg.getBoundingClientRect();'
         f'tip.style.display="block";'
-        f'tip.innerHTML="<b>"+fmt(p[2])+"</b><span>"+p[3]+" UTC</span>";'
-        f'tip.style.left=(p[0]*s)+"px";tip.style.top=(p[1]*s)+"px";'
-        f'}}'
-        f'function leave(){{guide.setAttribute("visibility","hidden");'
-        f'dot.setAttribute("visibility","hidden");tip.style.display="none";}}'
-        f'hit.addEventListener("mousemove",move);'
-        f'hit.addEventListener("mouseleave",leave);'
-        f'}})();</script>'
-        f'</div>'
+        f'tip.innerHTML="<b>"+(d[1]>=0?"+":"")+ptMoney(d[1])+" ("+(d[2]>=0?"+":"")'
+        f'+d[2]+"%)</b><span>"+d[0]+"</span><span>click for details</span>";'
+        f'tip.style.left=(e.clientX-r.left)+"px";tip.style.top=(e.clientY-r.top)+"px";}});'
+        f'g.addEventListener("mouseleave",function(){{tip.style.display="none";}});}});'
+        f'}})();</script></div>'
     )
 
 
@@ -660,6 +869,7 @@ def _portfolio_section(conn) -> str:
         prows = []
         open_rows = []   # richer rows for the "Open positions" detail modal
         pie_slices = []
+        bar_rows = []    # per-position unrealized P&L for the diverging bar chart
         # distribution accumulators: label -> [count, value]
         dist_ind, dist_country, dist_conf, dist_side = ({} for _ in range(4))
 
@@ -717,6 +927,7 @@ def _portfolio_section(conn) -> str:
                 f'<td class="{pcls}">{upct:+.0%}</td></tr>'
             )
             pie_slices.append({"name": q, "value": lv})
+            bar_rows.append({"mid": mid, "q": q, "pnl": pnl_d, "pct": upct})
 
             reasoning = (pred["model_reasoning"] if pred else "") or (
                 "No stored reasoning for this position.")
@@ -776,6 +987,7 @@ def _portfolio_section(conn) -> str:
         pos_block = '<h3>Open positions</h3><div class="empty">None open right now.</div>'
         pie_block = ''
         dist_block = ''
+        bar_rows = []
         modals["open"] = ('<h3 class="pm-q">Open positions (0)</h3>'
                           '<div class="pm-label">Open positions over time</div>'
                           + open_count_chart
@@ -844,6 +1056,26 @@ def _portfolio_section(conn) -> str:
 
     # ---- Realized P&L detail modal (closed trades: sells + settlements) ----
     closes = [t for t in record.get_trades(conn) if t["realized_pnl"] is not None]
+
+    # ---- extra stat cards + the new interactive charts (all on-disk data) ----
+    wins = sum(1 for t in closes if float(t["realized_pnl"]) > 0)
+    win_rate = wins / len(closes) if closes else None
+    fees_total = float(conn.execute(
+        "SELECT COALESCE(SUM(fee), 0) FROM trades").fetchone()[0])
+    avg_ticket = (sum(float(p["cost_basis"] or 0) for p in positions) / len(positions)
+                  if positions else 0.0)
+    exposure = positions_value / total if total else 0.0
+    cards2 = [
+        _stat_card("Win rate (closed)",
+                   f"{win_rate:.0%}" if win_rate is not None else "–",
+                   f"{wins}/{len(closes)} trades" if closes else "no closes yet"),
+        _stat_card("Exposure", f"{exposure:.0%}", "of equity invested"),
+        _stat_card("Avg ticket", f"${avg_ticket:,.0f}", "per open position"),
+        _stat_card("Fees paid", f"${fees_total:,.2f}", "simulated friction"),
+    ]
+    oc_main_chart = _open_count_main_svg(open_count_series)
+    cum_chart = _cum_pnl_svg(sorted(closes, key=lambda t: t["id"]))
+    bars_chart = _pnl_bars_svg(bar_rows)
     if closes:
         crows = "".join(
             f'<tr><td>{html.escape((t["timestamp"] or "")[:16].replace("T", " "))}</td>'
@@ -1072,7 +1304,21 @@ def _portfolio_section(conn) -> str:
             f'<button class="summary-btn" onclick="showModal(\'closecalls\')">'
             f'&#9678; Close calls ({cc_count})</button></h2>'
             f'<div class="cards">{"".join(cards)}</div>'
-            f'<h3>Equity over time</h3>{svg}{pos_block}{pie_block}{dist_block}'
+            f'<div class="cards">{"".join(cards2)}</div>'
+            f'{_HOVER_JS}'
+            f'<h3>Equity over time <span class="hint">(hover for cash / invested '
+            f'split)</span></h3>{svg}'
+            f'<div class="chart-grid">'
+            f'<div><h3>Open positions over time <span class="hint">(hover for the '
+            f'count)</span></h3>{oc_main_chart}</div>'
+            f'<div><h3>Realized P&amp;L over time <span class="hint">(hover for the '
+            f'trade behind each step)</span></h3>{cum_chart}</div></div>'
+            f'{pos_block}'
+            f'<div class="chart-grid">'
+            f'<div><h3>P&amp;L by open position <span class="hint">(hover for detail, '
+            f'click to open)</span></h3>{bars_chart}</div>'
+            f'<div>{pie_block}</div></div>'
+            f'{dist_block}'
             f'{ledger_block}{modal_block}')
 
 
@@ -1271,7 +1517,15 @@ def _build_html(conn) -> str:
                box-shadow: 0 4px 14px rgba(0,0,0,.28); z-index: 5; max-width: 280px; }}
   .chart-tip b {{ display: block; font-size: 13px; color: var(--text);
                  white-space: normal; }}
-  .chart-tip span {{ color: var(--muted); font-size: 11px; }}
+  .chart-tip span {{ display: block; color: var(--muted); font-size: 11px; }}
+  /* chart layout + shared marks */
+  .chart-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 2px 18px;
+                align-items: start; }}
+  @media (max-width: 720px) {{ .chart-grid {{ grid-template-columns: 1fr; }} }}
+  .area-fill {{ opacity: .10; }}
+  .pbar-g {{ cursor: pointer; }}
+  .pbar-g:hover .pbar-bar {{ opacity: .75; }}
+  .pbar-g:hover .pbar-hit {{ fill: var(--hover); opacity: .5; }}
   /* clickable open-position rows */
   tr.clickable {{ cursor: pointer; }}
   tr.clickable:hover td {{ background: var(--hover); }}
