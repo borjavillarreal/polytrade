@@ -29,6 +29,75 @@ def _stat_card(label: str, value: str, sub: str = "") -> str:
             f'<div class="value">{html.escape(value)}</div>{sub_html}</div>')
 
 
+def _fmt_tokens(n) -> str:
+    n = int(n or 0)
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
+def _cost_modal_html(conn, total_cost: float) -> str:
+    """Token/model usage breakdown behind the 'Model cost so far' card.
+    Reads the per-prediction usage already on disk — no API call, no cost."""
+    rows = record.model_usage(conn)
+    total_calls = sum(r["calls"] for r in rows)
+    tracked = sum(r["tracked_calls"] for r in rows)
+    untracked = total_calls - tracked
+
+    body_rows = []
+    tot = {"in": 0, "out": 0, "searches": 0}
+    for r in rows:
+        in_all = (r["input_tokens"] + r["cache_write_tokens"] + r["cache_read_tokens"])
+        tot["in"] += in_all
+        tot["out"] += r["output_tokens"]
+        tot["searches"] += r["web_searches"]
+        has_tok = r["tracked_calls"] > 0
+        period = f'{(r["first_call"] or "")[:10]} &rarr; {(r["last_call"] or "")[:10]}'
+        body_rows.append(
+            f'<tr><td class="q">{html.escape(r["model"])}'
+            f'<div class="sub">{period}</div></td>'
+            f'<td>{r["calls"]}</td>'
+            f'<td>{_fmt_tokens(in_all) if has_tok else "&mdash;"}</td>'
+            f'<td>{_fmt_tokens(r["output_tokens"]) if has_tok else "&mdash;"}</td>'
+            f'<td>{r["web_searches"] if has_tok else "&mdash;"}</td>'
+            f'<td>${r["cost_usd"]:.2f}</td></tr>'
+        )
+    if len(rows) > 1:
+        body_rows.append(
+            f'<tr><td class="q"><b>Total</b></td><td><b>{total_calls}</b></td>'
+            f'<td><b>{_fmt_tokens(tot["in"]) if tracked else "&mdash;"}</b></td>'
+            f'<td><b>{_fmt_tokens(tot["out"]) if tracked else "&mdash;"}</b></td>'
+            f'<td><b>{tot["searches"] if tracked else "&mdash;"}</b></td>'
+            f'<td><b>${total_cost:.2f}</b></td></tr>'
+        )
+
+    avg = total_cost / total_calls if total_calls else 0.0
+    notes = [
+        f'Every prediction is one analysis call. Average cost per analysis: '
+        f'<b>${avg:.3f}</b>.',
+        '&ldquo;Tokens in&rdquo; counts prompt + cached tokens (cache reads are '
+        'billed at ~0.1&times; the normal input rate, so they cost far less than '
+        'their count suggests).',
+    ]
+    if untracked:
+        notes.append(
+            f'Exact token counts are recorded per call starting 2026-10-08; '
+            f'<b>{untracked}</b> earlier analyses carry only their $ cost '
+            f'(included in every $ figure here).'
+        )
+    note_html = "".join(f'<div class="pm-note">{n}</div>' for n in notes)
+
+    table = (
+        '<table><thead><tr><th>model</th><th>analyses</th><th>tokens in</th>'
+        '<th>tokens out</th><th>web searches</th><th>est. cost</th></tr></thead>'
+        f'<tbody>{"".join(body_rows)}</tbody></table>'
+        if rows else '<div class="pm-note">No analysis calls recorded yet.</div>'
+    )
+    return (f'<h3 class="pm-q">Model usage &amp; cost</h3>{note_html}{table}')
+
+
 # Shared hover layer for every line/step chart: a crosshair that snaps to the
 # nearest data point, a highlight dot, and one tooltip. Emitted once per page.
 # All tooltip strings are pre-escaped server-side before being JSON-embedded.
@@ -1340,8 +1409,15 @@ def _build_html(conn) -> str:
         _stat_card("Predictions made", str(len(preds))),
         _stat_card("Open", str(len(open_preds)), "awaiting resolution"),
         _stat_card("Resolved", str(len(resolved)), "scored"),
-        _stat_card("Model cost so far", f"${cost:.2f}"),
+        (f'<div class="card clickable-card" onclick="showModal(\'cost\')">'
+         f'<div class="label">Model cost so far</div>'
+         f'<div class="value">${cost:.2f}</div>'
+         f'<div class="sub">click: tokens &amp; models</div></div>'),
     ]
+    # Registered after the portfolio section's script so PT_MODALS exists.
+    cost_modal_json = json.dumps(_cost_modal_html(conn, cost)).replace("</", "<\\/")
+    cost_modal_script = (f'<script>if(window.PT_MODALS)'
+                         f'PT_MODALS["cost"]={cost_modal_json};</script>')
 
     # ---- scoreboard ----
     if brier["n"]:
@@ -1607,8 +1683,7 @@ def _build_html(conn) -> str:
 </style></head><body><div class="wrap">
   <div class="topbar">
     <div><h1>Polytrade dashboard</h1>
-      <div class="meta">model {html.escape(config.ANTHROPIC_MODEL)} &middot; updated {updated}
-        &middot; paper-trading measurement &mdash; no real trades</div></div>
+      <div class="meta">model {html.escape(config.ANTHROPIC_MODEL)} &middot; updated {updated}</div></div>
     <button id="themebtn" class="theme-toggle" onclick="toggleTheme()">Theme</button>
   </div>
   <script>
@@ -1627,6 +1702,7 @@ def _build_html(conn) -> str:
   </script>
   <div class="cards">{''.join(cards)}</div>
   {portfolio_block}
+  {cost_modal_script}
   <h2>Model vs. market <span class="hint">(the underlying forecasting test)</span></h2>
   {scoreboard}
   {open_block}

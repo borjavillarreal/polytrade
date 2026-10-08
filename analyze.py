@@ -20,7 +20,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import config
 import record
@@ -153,7 +153,11 @@ def _normalize_confidence(raw) -> str:
 def call_model(client, row):
     """One analysis call with retry/backoff + pause_turn continuation.
 
-    Returns (model_prob, confidence, reasoning, cost_usd) or None on failure.
+    Returns (model_prob, confidence, reasoning, cost_usd, usage) or None on
+    failure, where usage is the exact token/search tally for the whole call:
+    {"input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens",
+    "web_searches"} — stored per prediction so the dashboard can show real
+    token counts, not just the $ estimate.
     """
     tools = _build_tools()
     system = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
@@ -164,6 +168,8 @@ def call_model(client, row):
             messages = [{"role": "user", "content": user_prompt}]
             total_searches = 0
             total_cost = 0.0
+            usage_totals = {"input_tokens": 0, "output_tokens": 0,
+                            "cache_write_tokens": 0, "cache_read_tokens": 0}
             final_message = None
 
             # Server-tool loop: resume on pause_turn.
@@ -180,6 +186,12 @@ def call_model(client, row):
                 _, searches = _extract_text_and_searches(message)
                 total_searches += searches
                 total_cost += _estimate_cost(message.usage, searches)
+                usage_totals["input_tokens"] += getattr(message.usage, "input_tokens", 0) or 0
+                usage_totals["output_tokens"] += getattr(message.usage, "output_tokens", 0) or 0
+                usage_totals["cache_write_tokens"] += (
+                    getattr(message.usage, "cache_creation_input_tokens", 0) or 0)
+                usage_totals["cache_read_tokens"] += (
+                    getattr(message.usage, "cache_read_input_tokens", 0) or 0)
                 final_message = message
 
                 if message.stop_reason == "pause_turn":
@@ -197,8 +209,14 @@ def call_model(client, row):
             prob = min(1.0, max(0.0, prob))
             confidence = _normalize_confidence(parsed.get("confidence"))
             reasoning = str(parsed.get("reasoning", "")).strip()
-            return prob, confidence, reasoning, total_cost
+            usage_totals["web_searches"] = total_searches
+            return prob, confidence, reasoning, total_cost, usage_totals
 
+        except anthropic.BadRequestError as exc:
+            # A 400 is permanent for this request (most commonly "credit balance
+            # is too low") — retrying with backoff only burns runner minutes.
+            print(f"    API rejected the call: {getattr(exc, 'message', None) or exc}")
+            return "rejected"
         except (anthropic.RateLimitError, anthropic.APIStatusError, anthropic.APIConnectionError) as exc:
             wait = config.API_BACKOFF_BASE_SECONDS * (2 ** attempt)
             print(f"    API error ({type(exc).__name__}); retry in {wait:.0f}s")
@@ -219,13 +237,19 @@ def main() -> None:
     conn = record.connect()
     record.init_db(conn)
 
-    pending = record.markets_without_predictions(conn)
+    # Only analyze markets whose resolution is still comfortably in the future.
+    # A backlog that sat while credits were exhausted fills with already-decided
+    # markets; predicting those is hindsight, not foresight, and costs real $.
+    min_res = (datetime.now(timezone.utc)
+               + timedelta(days=config.ANALYZE_MIN_DAYS_LEFT)).isoformat()
+    pending = record.markets_without_predictions(conn, min_resolution_iso=min_res)
     to_analyze = pending[: config.MAX_ANALYZE_PER_RUN]
 
     analyzed = 0
     skipped = 0
     failed = 0
     run_cost = 0.0
+    consecutive_rejects = 0
 
     try:
         for row in to_analyze:
@@ -236,12 +260,22 @@ def main() -> None:
 
             print(f"[{analyzed + failed + 1}/{len(to_analyze)}] {row['question'][:70]}")
             result = call_model(client, row)
+            if result == "rejected":
+                failed += 1
+                consecutive_rejects += 1
+                if consecutive_rejects >= 3:
+                    print("  aborting this run: the API is rejecting every call "
+                          "(most likely out of credit) — will try again next cycle")
+                    break
+                time.sleep(config.ANALYZE_RATE_LIMIT_SECONDS)
+                continue
+            consecutive_rejects = 0
             if result is None:
                 failed += 1
                 time.sleep(config.ANALYZE_RATE_LIMIT_SECONDS)
                 continue
 
-            model_prob, confidence, reasoning, cost = result
+            model_prob, confidence, reasoning, cost, usage = result
             market_prob = float(row["yes_price"])  # FROZEN at decision time
             edge = model_prob - market_prob
             decision_ts = datetime.now(timezone.utc).isoformat()
@@ -257,6 +291,7 @@ def main() -> None:
                 "model_reasoning": reasoning,
                 "model_name": config.ANTHROPIC_MODEL,
                 "token_cost_usd": cost,
+                **usage,
                 "fetch_timestamp": row["fetch_timestamp"],
                 "decision_timestamp": decision_ts,
                 "resolution_date": row["resolution_date"],
