@@ -45,6 +45,11 @@ CREATE TABLE IF NOT EXISTS predictions (
     model_reasoning   TEXT,
     model_name        TEXT,
     token_cost_usd    REAL,              -- estimated $ cost of the analysis call
+    input_tokens      INTEGER,           -- exact usage reported by the API...
+    output_tokens     INTEGER,
+    cache_write_tokens INTEGER,
+    cache_read_tokens INTEGER,
+    web_searches      INTEGER,           -- ...NULL on rows from before tracking
     fetch_timestamp   TEXT NOT NULL,
     decision_timestamp TEXT NOT NULL,
     resolution_date   TEXT,
@@ -118,6 +123,11 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> None:
             conn.execute("ALTER TABLE markets ADD COLUMN description TEXT")
         if "slug" not in cols:
             conn.execute("ALTER TABLE markets ADD COLUMN slug TEXT")
+        pcols = {r[1] for r in conn.execute("PRAGMA table_info(predictions)").fetchall()}
+        for col in ("input_tokens", "output_tokens", "cache_write_tokens",
+                    "cache_read_tokens", "web_searches"):
+            if col not in pcols:
+                conn.execute(f"ALTER TABLE predictions ADD COLUMN {col} INTEGER")
         conn.commit()
     finally:
         if own:
@@ -173,15 +183,24 @@ def set_market_slug(conn: sqlite3.Connection, market_id: str, slug: str) -> None
     conn.execute("UPDATE markets SET slug = ? WHERE market_id = ?", (slug, market_id))
 
 
-def markets_without_predictions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """Markets that have been fetched but not yet analyzed (idempotency source)."""
+def markets_without_predictions(
+        conn: sqlite3.Connection, min_resolution_iso: Optional[str] = None,
+) -> list[sqlite3.Row]:
+    """Markets that have been fetched but not yet analyzed (idempotency source).
+
+    min_resolution_iso: when given, exclude markets resolving before it. A
+    backlog that sat unanalyzed (e.g. while API credits were exhausted) fills
+    with markets whose resolution date has already passed — analyzing those
+    would spend credits on outcomes that are already known."""
+    where_fresh = ("AND m.resolution_date > :min_res" if min_resolution_iso else "")
     return conn.execute(
-        """
+        f"""
         SELECT m.* FROM markets m
         LEFT JOIN predictions p ON p.market_id = m.market_id
-        WHERE p.market_id IS NULL
+        WHERE p.market_id IS NULL {where_fresh}
         ORDER BY m.volume DESC
-        """
+        """,
+        {"min_res": min_resolution_iso} if min_resolution_iso else {},
     ).fetchall()
 
 
@@ -203,14 +222,19 @@ def insert_prediction(conn: sqlite3.Connection, pred: dict) -> bool:
         INSERT OR IGNORE INTO predictions (
             market_id, question, target_outcome, model_prob, market_prob, edge,
             model_confidence, model_reasoning, model_name, token_cost_usd,
+            input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+            web_searches,
             fetch_timestamp, decision_timestamp, resolution_date, resolved, outcome
         ) VALUES (
             :market_id, :question, :target_outcome, :model_prob, :market_prob, :edge,
             :model_confidence, :model_reasoning, :model_name, :token_cost_usd,
+            :input_tokens, :output_tokens, :cache_write_tokens, :cache_read_tokens,
+            :web_searches,
             :fetch_timestamp, :decision_timestamp, :resolution_date, 0, NULL
         )
         """,
-        pred,
+        {"input_tokens": None, "output_tokens": None, "cache_write_tokens": None,
+         "cache_read_tokens": None, "web_searches": None, **pred},
     )
     return cur.rowcount > 0
 
@@ -276,6 +300,31 @@ def open_prediction_count(conn: sqlite3.Connection) -> int:
 def total_token_cost(conn: sqlite3.Connection) -> float:
     row = conn.execute("SELECT COALESCE(SUM(token_cost_usd), 0) FROM predictions").fetchone()
     return float(row[0])
+
+
+def model_usage(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Per-model usage rollup for the cost modal: analysis calls, exact token
+    sums over the rows that recorded them (tracked_calls says how many did —
+    older rows predate per-call token tracking and only carry the $ cost),
+    web searches, and total estimated $ cost. Reads on-disk data only."""
+    return conn.execute(
+        """
+        SELECT COALESCE(model_name, 'unknown')           AS model,
+               COUNT(*)                                  AS calls,
+               SUM(CASE WHEN input_tokens IS NOT NULL THEN 1 ELSE 0 END) AS tracked_calls,
+               COALESCE(SUM(input_tokens), 0)            AS input_tokens,
+               COALESCE(SUM(output_tokens), 0)           AS output_tokens,
+               COALESCE(SUM(cache_write_tokens), 0)      AS cache_write_tokens,
+               COALESCE(SUM(cache_read_tokens), 0)       AS cache_read_tokens,
+               COALESCE(SUM(web_searches), 0)            AS web_searches,
+               COALESCE(SUM(token_cost_usd), 0)          AS cost_usd,
+               MIN(decision_timestamp)                   AS first_call,
+               MAX(decision_timestamp)                   AS last_call
+        FROM predictions
+        GROUP BY COALESCE(model_name, 'unknown')
+        ORDER BY cost_usd DESC
+        """
+    ).fetchall()
 
 
 # --------------------------------------------------------------------------

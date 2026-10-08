@@ -62,6 +62,11 @@ GAMMA_MAX_PAGES = 20
 # Max markets to analyze in a single analyze.py run (cost guardrail).
 MAX_ANALYZE_PER_RUN = 50
 
+# Skip backlogged markets resolving sooner than this many days from now. Keeps
+# a stale queue (e.g. after a long out-of-credit stretch) from spending money
+# on markets whose outcome is already known or imminent.
+ANALYZE_MIN_DAYS_LEFT = 2
+
 # Seconds to sleep between Anthropic calls (simple client-side rate limiting).
 ANALYZE_RATE_LIMIT_SECONDS = 2.0
 
