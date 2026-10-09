@@ -46,18 +46,25 @@ jobs:
         if: ${{ github.event.inputs.test_alert != 'true' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Real-money pilot credentials (engine is a no-op until these exist)
+          POLYMARKET_PRIVATE_KEY: ${{ secrets.POLYMARKET_PRIVATE_KEY }}
+          POLYMARKET_FUNDER_ADDRESS: ${{ secrets.POLYMARKET_FUNDER_ADDRESS }}
+          POLYMARKET_SIGNATURE_TYPE: ${{ secrets.POLYMARKET_SIGNATURE_TYPE }}
         run: python run_cycle.py
 
       - name: Publish dashboard as the Pages homepage
         if: ${{ github.event.inputs.test_alert != 'true' }}
-        run: cp dashboard.html index.html
+        run: |
+          cp dashboard.html index.html
+          mkdir -p real
+          cp real_dashboard.html real/index.html
 
       - name: Commit updated predictions + dashboard
         if: ${{ github.event.inputs.test_alert != 'true' }}
         run: |
           git config user.name "polytrade-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add -f polytrade.db dashboard.html index.html
+          git add -f polytrade.db dashboard.html index.html real_dashboard.html real/index.html
           if git diff --cached --quiet; then
             echo "No changes this cycle."
           else

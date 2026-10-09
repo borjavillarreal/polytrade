@@ -152,6 +152,35 @@ EXIT_ON_EDGE_CLOSED = True
 TRADE_FEE_PCT = 0.01
 
 # --------------------------------------------------------------------------
+# REAL-MONEY pilot (real_trading.py) — places ACTUAL orders on Polymarket.
+# Runs only when REAL_TRADING_ENABLED is True AND the wallet credentials exist
+# as environment variables (GitHub Actions secrets):
+#   POLYMARKET_PRIVATE_KEY     - private key of the DEDICATED pilot wallet
+#   POLYMARKET_FUNDER_ADDRESS  - the Polymarket deposit/proxy address
+#   POLYMARKET_SIGNATURE_TYPE  - 1 = email/Magic login, 2 = browser wallet (default 1)
+# Without them every cycle is a silent no-op and the /real/ page says so.
+# --------------------------------------------------------------------------
+REAL_TRADING_ENABLED = True
+# Accounting baseline for the return %: deposit this much USDC in the wallet.
+REAL_STARTING_BANKROLL_USD = 150.0
+# Hard per-order caps. Tickets are sized by the same conviction scaling as the
+# paper book but clamped to this band. Polymarket's CLOB min order is 5 shares.
+REAL_MIN_TICKET_USD = 5.0
+REAL_MAX_TICKET_USD = 10.0
+# Entry bar for REAL money — deliberately stricter than the paper book's
+# ENTRY_CONVICTION while the model's measured edge is unproven.
+REAL_ENTRY_CONVICTION = 0.08
+# Pace into the market: at most this many new real positions per cycle.
+REAL_MAX_BUYS_PER_CYCLE = 2
+REAL_MAX_OPEN_POSITIONS = 10
+# Kill switch: if net realized P&L over the trailing 24h drops to -this, the
+# engine stops BUYING (exits still run) until reset with
+#   python3 real_trading.py --reset-kill-switch
+REAL_DAILY_LOSS_LIMIT_USD = 20.0
+# One tick of price cushion is added to marketable orders so fills land.
+REAL_PRICE_CUSHION_TICKS = 1
+
+# --------------------------------------------------------------------------
 # 24/7 automation (run_cycle.py / run_forever.py) — paper mode, NO real trades
 # --------------------------------------------------------------------------
 # Hours between automated cycles in run_forever.py.

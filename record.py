@@ -103,6 +103,50 @@ CREATE TABLE IF NOT EXISTS equity_curve (
     positions_value  REAL,
     total_value      REAL
 );
+
+-- ----- REAL-money pilot (real_trading.py) — actual Polymarket orders -----
+CREATE TABLE IF NOT EXISTS real_positions (
+    market_id        TEXT PRIMARY KEY,
+    question         TEXT,
+    side             TEXT,                -- LONG (holds Yes token) | SHORT (holds No token)
+    token_id         TEXT,                -- CLOB token id actually held
+    shares           REAL,
+    entry_price      REAL,
+    cost_basis       REAL,                -- USDC spent
+    model_prob       REAL,
+    entry_timestamp  TEXT,
+    last_price       REAL,
+    last_value       REAL,
+    last_marked      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS real_trades (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp     TEXT NOT NULL,
+    market_id     TEXT,
+    question      TEXT,
+    action        TEXT,                   -- BUY | SELL | SETTLE
+    side          TEXT,
+    shares        REAL,
+    price         REAL,
+    cash_delta    REAL,                   -- ledger change (SETTLE credit needs UI claim)
+    realized_pnl  REAL,
+    reason        TEXT,
+    order_id      TEXT                    -- CLOB order id for the audit trail
+);
+
+CREATE TABLE IF NOT EXISTS real_equity_curve (
+    timestamp        TEXT PRIMARY KEY,
+    cash             REAL,
+    positions_value  REAL,
+    total_value      REAL
+);
+
+-- key/value state for the real engine (kill switch, last status line, ...)
+CREATE TABLE IF NOT EXISTS real_meta (
+    key    TEXT PRIMARY KEY,
+    value  TEXT
+);
 """
 
 
@@ -455,6 +499,38 @@ def candidate_entries(conn: sqlite3.Connection) -> list[sqlite3.Row]:
           AND p.market_id NOT IN (SELECT DISTINCT market_id FROM trades)
         """
     ).fetchall()
+
+
+def real_candidate_entries(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Open predictions the REAL book doesn't hold and never traded (same shape
+    as candidate_entries, but keyed off the real_* tables)."""
+    return conn.execute(
+        """
+        SELECT p.market_id, p.question, p.model_prob, p.target_outcome,
+               p.model_confidence, m.yes_price AS current_price
+        FROM predictions p
+        JOIN markets m ON m.market_id = p.market_id
+        WHERE p.resolved = 0
+          AND p.market_id NOT IN (SELECT market_id FROM real_positions)
+          AND p.market_id NOT IN (SELECT DISTINCT market_id FROM real_trades)
+        """
+    ).fetchall()
+
+
+def real_meta_get(conn: sqlite3.Connection, key: str) -> Optional[str]:
+    row = conn.execute("SELECT value FROM real_meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def real_meta_set(conn: sqlite3.Connection, key: str, value: Optional[str]) -> None:
+    if value is None:
+        conn.execute("DELETE FROM real_meta WHERE key = ?", (key,))
+    else:
+        conn.execute(
+            "INSERT INTO real_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
 
 
 def position_confidences(conn: sqlite3.Connection) -> dict:

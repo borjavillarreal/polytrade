@@ -1,0 +1,88 @@
+<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Polytrade — real-money pilot</title>
+<script>(function(){try{var t=localStorage.getItem("pt-theme")||"dark";
+document.documentElement.setAttribute("data-theme",t);}catch(e){
+document.documentElement.setAttribute("data-theme","dark");}})();</script>
+<style>
+:root, :root[data-theme="dark"] { --bg:#0f1216; --panel:#1a1f27; --border:#262d38;
+  --text:#e7ecf2; --muted:#8a94a3; --head:#c7d0db; --good:#4ade80; --bad:#f87171;
+  --accent:#6ea8fe; --ok-bg:#12271a; --ok-bd:#1f5131; --warn-bg:#2b2213;
+  --warn-bd:#6b5420; --code:#232a34; color-scheme:dark; }
+:root[data-theme="light"] { --bg:#f2f0fb; --panel:#ffffff; --border:#e6e2f2;
+  --text:#2e2a3b; --muted:#8d87a0; --head:#564f6e; --good:#2e9e62; --bad:#d96270;
+  --accent:#7a6ff0; --ok-bg:#e7f6ec; --ok-bd:#bfe5cc; --warn-bg:#fdf3dc;
+  --warn-bd:#eedca8; --code:#efecf9; color-scheme:light; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 -apple-system,
+  BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+.wrap { max-width:960px; margin:0 auto; padding:26px 16px 60px; }
+h1 { font-size:21px; margin:0; } h2 { font-size:16px; margin:28px 0 10px; }
+.meta { color:var(--muted); font-size:12.5px; margin-top:3px; }
+.topbar { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
+.btn { background:var(--panel); color:var(--text); border:1px solid var(--border);
+  border-radius:8px; padding:6px 12px; font-size:12.5px; cursor:pointer;
+  text-decoration:none; display:inline-block; }
+.banner { border-radius:10px; padding:10px 14px; margin:16px 0; font-size:13px; }
+.banner.ok { background:var(--ok-bg); border:1px solid var(--ok-bd); }
+.banner.warn { background:var(--warn-bg); border:1px solid var(--warn-bd); }
+.cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+  gap:10px; margin:14px 0; }
+.card { background:var(--panel); border:1px solid var(--border); border-radius:10px;
+  padding:12px 14px; }
+.label { color:var(--muted); font-size:11.5px; text-transform:uppercase;
+  letter-spacing:.05em; }
+.value { font-size:20px; font-weight:650; margin-top:3px; }
+.sub { color:var(--muted); font-size:12px; margin-top:2px; }
+.good { color:var(--good); } .bad { color:var(--bad); }
+table { width:100%; border-collapse:collapse; font-size:12.5px; background:var(--panel);
+  border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+th,td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--border); }
+th { color:var(--head); font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+tr:last-child td { border-bottom:none; } .q { max-width:380px; }
+.empty { background:var(--panel); border:1px dashed var(--border); border-radius:10px;
+  padding:16px; color:var(--muted); }
+code { background:var(--code); border-radius:5px; padding:1px 6px; font-size:12px; }
+.chart { width:100%; height:auto; background:var(--panel); border:1px solid var(--border);
+  border-radius:10px; }
+.line { fill:none; stroke:var(--accent); stroke-width:2; }
+.dot { fill:var(--accent); } .base { stroke:var(--muted); stroke-dasharray:4 4;
+  stroke-width:1; opacity:.6; }
+.lab { fill:var(--muted); font-size:10px; }
+.note { color:var(--muted); font-size:12.5px; }
+@media (max-width:720px) { .q { max-width:170px; } }
+</style></head><body><div class="wrap">
+<div class="topbar"><div><h1>Polytrade — real-money pilot</h1>
+<div class="meta">updated 2026-10-09 17:10 UTC &middot; bankroll $150 &middot;
+tickets $5&ndash;$10
+&middot; entry bar 0.08
+&middot; daily-loss halt $20</div></div>
+<div><a class="btn" href="../">&larr; Paper dashboard</a>
+<button class="btn" id="themebtn" onclick="toggleTheme()">Theme</button></div></div>
+<script>
+function applyThemeLabel(t){var b=document.getElementById("themebtn");
+if(b)b.textContent=(t==="light")?"\u2600 Light":"\u263E Dark";}
+function toggleTheme(){var d=document.documentElement;
+var t=(d.getAttribute("data-theme")==="light")?"dark":"light";
+d.setAttribute("data-theme",t);try{localStorage.setItem("pt-theme",t);}catch(e){}
+applyThemeLabel(t);}
+applyThemeLabel(document.documentElement.getAttribute("data-theme")||"dark");
+</script>
+<div class="banner warn">Engine status: no cycle has run yet</div>
+<div class="cards">
+<div class="card"><div class="label">Equity</div><div class="value good">$150.00</div><div class="sub">vs $150 deposited</div></div>
+<div class="card"><div class="label">Net P&amp;L</div><div class="value good">$+0.00</div><div class="sub">+0.0%</div></div>
+<div class="card"><div class="label">Cash</div><div class="value ">$150.00</div></div>
+<div class="card"><div class="label">Invested</div><div class="value ">$0.00</div><div class="sub">0 open position(s)</div></div>
+<div class="card"><div class="label">Realized P&amp;L</div><div class="value good">$+0.00</div><div class="sub">closed + settled</div></div>
+</div>
+<h2>Equity over time</h2>
+<div class="empty">The equity curve appears after the first two cycles with the engine live.</div>
+<h2>Open positions</h2>
+<div class="empty">No open real positions.</div>
+<h2>Every movement</h2>
+<div class="empty">No real trades yet. The engine enters only when a prediction clears conviction 0.08 and all risk caps allow it.</div>
+<p class="note">Orders are Fill-Or-Kill marketable limits placed by the automated
+engine each cycle. Settled wins are booked here at resolution but the USDC
+becomes spendable only after you claim the position in the Polymarket app.</p>
+</div></body></html>
