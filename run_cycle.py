@@ -21,7 +21,9 @@ import fetch_markets
 import analyze
 import score
 import paper_trading
+import real_trading
 import dashboard
+import dashboard_real
 
 
 def _notify(title: str, message: str) -> None:
@@ -86,10 +88,24 @@ def main() -> None:
     except Exception as exc:
         print(f"  [paper_trading] failed: {exc}")
 
+    # REAL-money pilot (actual Polymarket orders; inert without credentials)
+    real_summary = None
+    try:
+        rt_conn = record.connect()
+        record.init_db(rt_conn)
+        real_summary = real_trading.run(rt_conn)
+        rt_conn.close()
+    except Exception as exc:
+        print(f"  [real_trading] failed: {exc}")
+
     try:
         dashboard.generate(open_browser=False)
     except Exception as exc:
         print(f"  [dashboard] failed: {exc}")
+    try:
+        dashboard_real.generate()
+    except Exception as exc:
+        print(f"  [dashboard_real] failed: {exc}")
 
     # --- alerts: what changed this cycle ---
     conn = record.connect()
@@ -146,6 +162,20 @@ def main() -> None:
             alert_lines.append(f"  SOLD ({s['reason']}) {s['pnl']:+.2f} — {s['question'][:58]}")
         for s in ts["settles"]:
             alert_lines.append(f"  SETTLED {s['pnl']:+.2f} — {s['question'][:58]}")
+    # REAL-money activity always alerts (so every real trade reaches your inbox).
+    if real_summary and real_summary.get("enabled") and (
+            real_summary["buys"] or real_summary["sells"] or real_summary["settles"]):
+        rs = real_summary
+        alert_lines.append("")
+        alert_lines.append(
+            f"REAL-MONEY pilot: equity ${rs['equity']:.2f}, cash ${rs['cash']:.2f}, "
+            f"{rs['open']} open position(s).")
+        for b in rs["buys"]:
+            alert_lines.append(f"  REAL BUY ${b['stake']:.2f} {b['side']} — {b['question'][:56]}")
+        for s in rs["sells"]:
+            alert_lines.append(f"  REAL SELL ({s['reason']}) {s['pnl']:+.2f} — {s['question'][:56]}")
+        for s in rs["settles"]:
+            alert_lines.append(f"  REAL SETTLED {s['pnl']:+.2f} — {s['question'][:56]}")
     if alert_lines:
         with open("alerts.txt", "w") as fh:
             fh.write("\n".join(alert_lines) + "\n")

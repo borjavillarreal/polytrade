@@ -1684,7 +1684,10 @@ def _build_html(conn) -> str:
   <div class="topbar">
     <div><h1>Polytrade dashboard</h1>
       <div class="meta">model {html.escape(config.ANTHROPIC_MODEL)} &middot; updated {updated}</div></div>
-    <button id="themebtn" class="theme-toggle" onclick="toggleTheme()">Theme</button>
+    <div style="display:flex;gap:8px;align-items:center">
+      <a class="theme-toggle" style="text-decoration:none" href="real/">$ Real pilot</a>
+      <button id="themebtn" class="theme-toggle" onclick="toggleTheme()">Theme</button>
+    </div>
   </div>
   <script>
     function applyThemeLabel(t){{

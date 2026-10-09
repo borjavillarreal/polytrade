@@ -1,4 +1,6 @@
-# Read-only measurement harness — no web3 / wallet / trading libraries.
 anthropic>=0.45.0
 requests>=2.31.0
 python-dotenv>=1.0.0   # optional: lets you keep your API key in a .env file
+# Real-money pilot: official Polymarket CLOB client (signs orders with the
+# dedicated pilot wallet's key, supplied via GitHub Actions secrets).
+py-clob-client>=0.17
