@@ -259,10 +259,12 @@ def run(conn) -> dict:
 
     # ---- 2) kill switch ----
     realized24 = _realized_last_24h(conn)
+    kill_new = False
     if realized24 <= -config.REAL_DAILY_LOSS_LIMIT_USD and \
             not record.real_meta_get(conn, KILL_KEY):
         record.real_meta_set(conn, KILL_KEY, now)
         conn.commit()
+        kill_new = True
     kill_tripped = record.real_meta_get(conn, KILL_KEY)
 
     # ---- 3) entries ----
@@ -342,7 +344,9 @@ def run(conn) -> dict:
         "INSERT OR REPLACE INTO real_equity_curve "
         "(timestamp, cash, positions_value, total_value) VALUES (?,?,?,?)",
         (now, cash, float(pos_value), equity))
-    summary.update({"cash": cash, "equity": equity, "open": open_count})
+    summary.update({"cash": cash, "equity": equity, "open": open_count,
+                    "kill_switch": bool(kill_tripped), "kill_switch_new": kill_new,
+                    "realized24": realized24})
     state = "KILL SWITCH TRIPPED (exits only)" if kill_tripped else "LIVE"
     _set_status(conn, f"{state} — balance ${balance:.2f}, equity ${equity:.2f}, "
                       f"{open_count} open, 24h realized ${realized24:+.2f}")
