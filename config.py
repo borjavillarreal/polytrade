@@ -60,7 +60,8 @@ GAMMA_MAX_PAGES = 20
 # Analysis run limits (analyze.py)
 # --------------------------------------------------------------------------
 # Max markets to analyze in a single analyze.py run (cost guardrail).
-MAX_ANALYZE_PER_RUN = 50
+# 10/run x 4 cycles/day x ~$0.12/call keeps the model budget near $5/day.
+MAX_ANALYZE_PER_RUN = 10
 
 # Skip backlogged markets resolving sooner than this many days from now. Keeps
 # a stale queue (e.g. after a long out-of-credit stretch) from spending money
@@ -179,6 +180,10 @@ REAL_MAX_OPEN_POSITIONS = 10
 REAL_DAILY_LOSS_LIMIT_USD = 20.0
 # One tick of price cushion is added to marketable orders so fills land.
 REAL_PRICE_CUSHION_TICKS = 1
+# Email alerts fire only for a real trade MUCH bigger than a normal ticket:
+# stake or |realized P&L| at or above this. Routine trades stay on the /real/
+# dashboard but send no email. The kill switch tripping always emails.
+REAL_ALERT_TRADE_USD = 20.0
 
 # --------------------------------------------------------------------------
 # 24/7 automation (run_cycle.py / run_forever.py) — paper mode, NO real trades

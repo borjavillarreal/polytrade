@@ -133,49 +133,41 @@ def main() -> None:
             "Run the dashboard to see how the model scored.",
         )
 
-    # Write this cycle's NEW alerts to a file. The cloud workflow turns a non-empty
-    # alerts.txt into a GitHub issue that emails you. Cleared when nothing is new,
-    # so you never get re-emailed about markets you've already been told about.
+    # Email policy (owner's request): no routine mail. alerts.txt — which the
+    # cloud workflow turns into an email — is written ONLY for a REAL trade much
+    # bigger than a normal ticket (stake or |P&L| >= REAL_ALERT_TRADE_USD) or
+    # for the kill switch tripping. Paper activity, new high-edge predictions,
+    # and resolutions stay visible on the dashboards but send nothing.
     alert_lines = []
-    for r in sorted(new_big, key=lambda x: abs(x["edge"]), reverse=True):
-        alert_lines.append(
-            f"- {r['question']}\n    model {r['model_prob']:.2f} vs market "
-            f"{r['market_prob']:.2f}  (edge {r['edge']:+.2f})"
-        )
-    if newly_resolved:
-        alert_lines.append(
-            f"- {len(newly_resolved)} market(s) just resolved — see the dashboard "
-            "for how the model scored vs. the market."
-        )
-    if trade_summary and trade_summary.get("enabled") and (
-            trade_summary["buys"] or trade_summary["sells"] or trade_summary["settles"]):
-        ts = trade_summary
-        alert_lines.append("")
-        alert_lines.append(
-            f"Paper portfolio: ${ts['equity']:.2f} ({ts['return_pct']:+.1%} vs "
-            f"${config.STARTING_CAPITAL:.0f}), cash ${ts['cash']:.2f}, "
-            f"{ts['open']} open position(s)."
-        )
-        for b in ts["buys"]:
-            alert_lines.append(f"  BOUGHT ${b['stake']:.0f} {b['side']} — {b['question'][:58]}")
-        for s in ts["sells"]:
-            alert_lines.append(f"  SOLD ({s['reason']}) {s['pnl']:+.2f} — {s['question'][:58]}")
-        for s in ts["settles"]:
-            alert_lines.append(f"  SETTLED {s['pnl']:+.2f} — {s['question'][:58]}")
-    # REAL-money activity always alerts (so every real trade reaches your inbox).
-    if real_summary and real_summary.get("enabled") and (
-            real_summary["buys"] or real_summary["sells"] or real_summary["settles"]):
+    if real_summary and real_summary.get("enabled"):
         rs = real_summary
-        alert_lines.append("")
-        alert_lines.append(
-            f"REAL-MONEY pilot: equity ${rs['equity']:.2f}, cash ${rs['cash']:.2f}, "
-            f"{rs['open']} open position(s).")
+        big_real = []
         for b in rs["buys"]:
-            alert_lines.append(f"  REAL BUY ${b['stake']:.2f} {b['side']} — {b['question'][:56]}")
+            if b["stake"] >= config.REAL_ALERT_TRADE_USD:
+                big_real.append(
+                    f"  REAL BUY ${b['stake']:.2f} {b['side']} — {b['question'][:56]}")
         for s in rs["sells"]:
-            alert_lines.append(f"  REAL SELL ({s['reason']}) {s['pnl']:+.2f} — {s['question'][:56]}")
+            if abs(s["pnl"]) >= config.REAL_ALERT_TRADE_USD:
+                big_real.append(
+                    f"  REAL SELL ({s['reason']}) {s['pnl']:+.2f} — {s['question'][:56]}")
         for s in rs["settles"]:
-            alert_lines.append(f"  REAL SETTLED {s['pnl']:+.2f} — {s['question'][:56]}")
+            if abs(s["pnl"]) >= config.REAL_ALERT_TRADE_USD:
+                big_real.append(
+                    f"  REAL SETTLED {s['pnl']:+.2f} — {s['question'][:56]}")
+        if big_real:
+            alert_lines.append(
+                f"REAL-money trade(s) well above the normal ticket "
+                f"(>= ${config.REAL_ALERT_TRADE_USD:.0f}):")
+            alert_lines.extend(big_real)
+            alert_lines.append(
+                f"  Book: equity ${rs['equity']:.2f}, cash ${rs['cash']:.2f}, "
+                f"{rs['open']} open position(s).")
+        if rs.get("kill_switch_new"):
+            alert_lines.append(
+                f"REAL-money KILL SWITCH TRIPPED: 24h realized P&L "
+                f"${rs.get('realized24', 0.0):+.2f} hit the "
+                f"-${config.REAL_DAILY_LOSS_LIMIT_USD:.0f} limit. Buying is halted "
+                "(exits still run) until: python3 real_trading.py --reset-kill-switch")
     if alert_lines:
         with open("alerts.txt", "w") as fh:
             fh.write("\n".join(alert_lines) + "\n")
